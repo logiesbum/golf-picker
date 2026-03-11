@@ -5,7 +5,7 @@ A fully interactive golf pick'em analytics dashboard. Track picks, view AI-power
 ## Setup (2 minutes)
 
 ### Step 1 — Upload to GitHub
-- Create a new repository on GitHub (name it anything, e.g. `golf-dashboard`)
+- Create a new repository on GitHub (name it anything, e.g. `golf-picker`)
 - Upload the `index.html` file to the repo
 
 ### Step 2 — Enable GitHub Pages
