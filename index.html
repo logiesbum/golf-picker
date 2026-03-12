@@ -320,7 +320,7 @@ const TIERS = {
 let state = {
   view:"overview", ranker:DEFAULT_RANKER, aiNote:"", lastRefresh:"",
   apiKey:"", sortK:"sg", sortD:"desc", tourF:"all", search:"", selPlayer:null,
-  leaderboard:[], lbEvent:"", lbStatus:"", lbLoaded:false,
+  leaderboard:[], lbEvent:"", lbStatus:"", lbLoaded:false, field:[],
 };
 
 // ── STORAGE ───────────────────────────────────────────────────────────────
@@ -386,12 +386,26 @@ async function loadLeaderboard(){
     state.lbStatus=data.status;
     state.lbInProgress=data.inProgress;
     state.lbLoaded=true;
-    // update sidebar tournament box
+
+    // Store the actual live field from ESPN
+    state.field=data.competitors.map(c=>c.name.toLowerCase().trim());
+
+    // Filter ranker to only players ESPN confirms are in this tournament
+    if(state.field.length>5){
+      const inField=r=>state.field.some(f=>
+        f===r.name.toLowerCase().trim()||
+        f.includes(r.name.split(" ").pop().toLowerCase())
+      );
+      state.ranker=state.ranker.filter(inField);
+      if(state.ranker.length<5){
+        state.ranker=DEFAULT_RANKER.filter(inField);
+      }
+    }
+
     document.getElementById("tourn-name").textContent=data.eventName;
     document.getElementById("tourn-status").innerHTML=data.inProgress
       ?`<span class="live-dot"></span><span class="tourn-live">LIVE · ${h(data.status)}</span>`
       :`<span style="color:#6b8f76">${h(data.status)}</span>`;
-    // update caddie pick
     updateCaddiePick();
   } else {
     document.getElementById("tourn-name").textContent="The Players Championship";
@@ -653,8 +667,18 @@ function renderLeaderboard(container){
   if(!hasScores&&!state.lbInProgress){
     // Pre-tournament: show field with odds
     html+=`<div style="background:rgba(212,175,55,.06);border:1px solid rgba(212,175,55,.2);border-radius:9px;padding:12px 16px;margin-bottom:16px;font-size:13px;color:#f5d97a">
-      Tournament hasn't started yet — showing field with current odds. Caddie rankings update automatically once play begins.
+      Tournament hasn't started yet — showing field with current odds. <span style="color:#86efac;font-weight:600">${state.leaderboard.length} players</span> confirmed in field via ESPN. Caddie rankings update once play begins.
     </div>`;
+
+    // Build list: ESPN field players we have stats for, plus ESPN-only players
+    const fieldFromStats=PLAYERS.filter(p=>
+      state.field.some(f=>f===p.name.toLowerCase().trim()||f.includes(p.name.split(" ").pop().toLowerCase()))
+    );
+    // ESPN players we don't have in our database — show name only
+    const espnOnlyNames=state.leaderboard
+      .filter(c=>!PLAYERS.some(p=>state.field&&c.name.toLowerCase().includes(p.name.split(" ").pop().toLowerCase())))
+      .map(c=>c.name);
+
     html+=`<div class="panel"><table>
       <thead><tr>
         <th style="text-align:center">OWGR</th>
@@ -666,7 +690,7 @@ function renderLeaderboard(container){
         <th style="text-align:center">Bet365</th>
         <th style="text-align:center">Best Line</th>
       </tr></thead><tbody>`;
-    PLAYERS.sort((a,b)=>a.owgr-b.owgr).slice(0,20).forEach(p=>{
+    fieldFromStats.sort((a,b)=>a.owgr-b.owgr).forEach(p=>{
       const rk=state.ranker.find(r=>r.name===p.name);
       const prob=rk?.prob||0;
       const isWD=rk?.note?.includes("❌ WD");
@@ -674,11 +698,17 @@ function renderLeaderboard(container){
       html+=`<tr style="opacity:${isWD?.35:1}">
         <td style="text-align:center;font-family:'DM Mono',monospace;font-size:12px;color:#6b8f76">${p.owgr}</td>
         <td><div style="font-weight:600">${p.f} ${h(p.name)}${isWD?`<span class="wd-badge">WD</span>`:""}</div><div style="font-size:10px;color:${p.tour==="PGA"?"#60a5fa":"#f472b6"};margin-top:1px">${p.tour}</div></td>
-        <td style="text-align:center;font-family:'DM Mono',monospace;font-weight:700;color:${prob>=25?"#f5d97a":prob>=15?"#86efac":"#6b8f76"}">${isWD?"WD":prob+"%"}</td>
+        <td style="text-align:center;font-family:'DM Mono',monospace;font-weight:700;color:${prob>=25?"#f5d97a":prob>=15?"#86efac":"#6b8f76"}">${isWD?"WD":prob?prob+"%":"—"}</td>
         ${["dk","fd","mgm","bet365"].map(bk=>`<td style="text-align:center"><span class="odds-pill ${oddsClass(p.books[bk])}">${h(p.books[bk])}</span></td>`).join("")}
         <td style="text-align:center"><span class="odds-pill odds-mid" style="border-color:#86efac;color:#86efac">+${best}</span></td>
       </tr>`;
     });
+    if(espnOnlyNames.length){
+      html+=`<tr><td colspan="8" style="padding:8px 12px;font-size:11px;color:#6b8f76;font-family:'DM Mono',monospace;background:#0a1410;text-transform:uppercase;letter-spacing:.05em">Also in field (stats not yet in database)</td></tr>`;
+      espnOnlyNames.forEach(name=>{
+        html+=`<tr><td style="text-align:center;color:#6b8f76;font-size:12px">—</td><td style="font-size:13px;font-weight:500">${h(name)}</td><td colspan="6" style="font-size:11px;color:#6b8f76">Hit Refresh to generate Caddie ranking</td></tr>`;
+      });
+    }
     html+=`</tbody></table></div>`;
   } else {
     // Live/post-tournament leaderboard with odds
@@ -740,7 +770,13 @@ function renderPlayers(container){
     {k:"sg",l:"SG Tot"},{k:"app",l:"SG App"},{k:"ott",l:"OTT"},{k:"atg",l:"ATG"},{k:"putt",l:"Putt"},
     {k:"drv",l:"Drive"},{k:"gir",l:"GIR%"},{k:"avg",l:"Avg"},{k:"fit",l:"Fit"},{k:"prob",l:"T10%"},
   ];
+  // Only show players who are in the live ESPN field (if we have field data)
+  const inLiveField=p=>{
+    if(!state.field||state.field.length===0) return true; // no field data yet, show all
+    return state.field.some(f=>f===p.name.toLowerCase().trim()||f.includes(p.name.split(" ").pop().toLowerCase()));
+  };
   let fpl=[...PLAYERS]
+    .filter(inLiveField)
     .filter(p=>state.tourF==="all"||p.tour===state.tourF)
     .filter(p=>!state.search||p.name.toLowerCase().includes(state.search.toLowerCase()))
     .sort((a,b)=>{const av=a[state.sortK]??0,bv=b[state.sortK]??0;if(typeof av==="string")return state.sortD==="asc"?av.localeCompare(bv):bv.localeCompare(av);return state.sortD==="asc"?av-bv:bv-av;});
@@ -901,18 +937,23 @@ document.getElementById("btn-refresh").onclick=async function(){
   btn.innerHTML='<span class="spinning">🔄</span> Updating rankings…';
   try{
     const liveBlock=live?live.summary:"Live data unavailable — use current SG stats for ranking.";
+    const fieldNames=state.field.length>0
+      ? `\nACTUAL TOURNAMENT FIELD (only rank players from this list):\n${state.leaderboard.map(c=>c.name).join(", ")}\n`
+      : "";
     const prompt=`You are a PGA Tour analytics AI updating rankings for a golf pick'em bracket.
 
 === LIVE DATA ===
 ${liveBlock}
-
+${fieldNames}
 === TASK ===
-Generate top-15 player rankings. Rules:
-- WITHDRAWN players: set prob=0, note="❌ WD — withdrew", do not remove them (show so user knows)
-- Missed cut: exclude or very low prob
-- Leading players in live tournament: boost prob significantly (e.g. if R4 leader, prob=75-90%)
+Generate top-15 player rankings using ONLY players confirmed in the tournament field above.
+Rules:
+- ONLY include players who are in the actual field — do NOT include LIV-only players or anyone not listed
+- WITHDRAWN players: set prob=0, note="❌ WD — withdrew"
+- Missed cut: very low prob or exclude
+- Leading players in live tournament: boost prob significantly
 - If pre-tournament: rank by SG:Approach (#1 stat for Sawgrass), GIR%, course fit
-- Include current odds where known
+- Be realistic with probabilities — a current leader in R4 should have prob 70-90%
 
 Return ONLY valid JSON (no markdown):
 {"note":"1 sentence live storyline","players":[{"rank":1,"name":"Full Name","tier":"Elite","prob":42,"odds":"+480","note":"under 12 words current status"}]}
