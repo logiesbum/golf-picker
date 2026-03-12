@@ -207,7 +207,7 @@ tr:hover td{background:rgba(45,106,79,.12)}
       <div class="modal-title">⚙️ API Settings</div>
       <button class="modal-close" id="settings-close">×</button>
     </div>
-    <div class="info-box">Your key is saved only in <strong>your browser's local storage</strong> — it never leaves your device except to call Anthropic directly to power the Caddie Pick rankings.</div>
+    <div class="info-box">Your key is saved only in <strong>your browser's local storage</strong>. <strong>Note:</strong> calling Anthropic directly from a static site (GitHub Pages) is often blocked by browser CORS and also exposes your key to the page. For a reliable setup, route requests through a small backend/proxy (Cloudflare Worker / Netlify Function / Vercel).</div>
     <div style="margin-bottom:10px">
       <label class="field-label">Anthropic API Key</label>
       <input class="field-inp" id="api-key-inp" type="password" placeholder="sk-ant-api03-…"/>
@@ -894,13 +894,28 @@ async function fetchLiveTournamentData(){
 }
 
 document.getElementById("btn-refresh").onclick=async function(){
-  if(!state.apiKey){openSettings();return;}
   const btn=this;btn.disabled=true;
+
+  // Always refresh ESPN data (works on static hosting)
   btn.innerHTML='<span class="spinning">🔄</span> Fetching scores…';
-  const live=await fetchLiveTournamentData();
+  await loadLeaderboard();
+
+  // If no Anthropic key, stop here (still useful)
+  if(!state.apiKey){
+    state.aiNote="Live leaderboard updated (add API key + proxy for AI rankings).";
+    sSet("note",state.aiNote);
+    const now=new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"})+" · "+new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"});
+    state.lastRefresh=now;sSet("lr",now);
+    btn.disabled=false;btn.innerHTML='🔄 Refresh Data';
+    render();
+    return;
+  }
+
   btn.innerHTML='<span class="spinning">🔄</span> Updating rankings…';
+
+  // Try Anthropic; if blocked (common on GitHub Pages), fall back gracefully.
   try{
-    const liveBlock=live?live.summary:"Live data unavailable — use current SG stats for ranking.";
+    const liveBlock=state.lbLoaded ? buildLiveSummary() : "Live data unavailable — use current SG stats for ranking.";
     const prompt=`You are a PGA Tour analytics AI updating rankings for a golf pick'em bracket.
 
 === LIVE DATA ===
@@ -922,9 +937,21 @@ Exactly 15 players. prob is integer 0-99.`;
 
     const res=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
-      headers:{"Content-Type":"application/json","x-api-key":state.apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      headers:{
+        "Content-Type":"application/json",
+        "x-api-key":state.apiKey,
+        "anthropic-version":"2023-06-01",
+        // Required for direct-from-browser calls, but many setups still fail due to CORS.
+        "anthropic-dangerous-direct-browser-access":"true"
+      },
       body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1400,messages:[{role:"user",content:prompt}]})
     });
+
+    if(!res.ok){
+      const errTxt = await res.text().catch(()=> "");
+      throw new Error("Anthropic request failed: "+res.status+" "+errTxt.slice(0,200));
+    }
+
     const d=await res.json();
     const txt=(d.content||[]).map(b=>b.text||"").join("");
     const m=txt.match(/\{[\s\S]*\}/);
@@ -933,13 +960,16 @@ Exactly 15 players. prob is integer 0-99.`;
       if(parsed.players?.length){
         state.ranker=parsed.players;sSet("ranker",parsed.players);
         state.aiNote=parsed.note||"";sSet("note",state.aiNote);
-        const now=new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"})+" · "+new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"});
-        state.lastRefresh=now;sSet("lr",now);
       }
     }
-  }catch(e){state.aiNote="Error — check API key in Settings.";}
-  // also refresh ESPN leaderboard data
-  await loadLeaderboard();
+  }catch(e){
+    state.aiNote="AI rankings blocked (CORS/static hosting). Using default rankings.";
+    sSet("note",state.aiNote);
+  }
+
+  const now=new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"})+" · "+new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"});
+  state.lastRefresh=now;sSet("lr",now);
+
   btn.disabled=false;btn.innerHTML='🔄 Refresh Data';
   render();
 };
