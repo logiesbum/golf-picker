@@ -300,10 +300,10 @@ const DEFAULT_RANKER = [
   {rank:4, name:"Tommy Fleetwood",  tier:"Contender",prob:22,odds:"+2500",note:"Precision over power; loves demanding courses"},
   {rank:5, name:"Viktor Hovland",   tier:"Contender",prob:21,odds:"+2000",note:"Ball-striking machine; strong Sawgrass trend"},
   {rank:6, name:"Xander Schauffele",tier:"Elite",    prob:21,odds:"+1400",note:"Major champion consistency; rock solid"},
-  {rank:7, name:"Jon Rahm",         tier:"LIV Watch",prob:20,odds:"+2800",note:"Top-10 pedigree; limited recent PGA data"},
+  {rank:7, name:"Jordan Spieth",    tier:"Contender",prob:16,odds:"+5000",note:"Elite putter; strong Sawgrass history"},
   {rank:8, name:"Ryan Gerard",      tier:"Sleeper",  prob:18,odds:"+7000",note:"Top-8 SG total; flying under radar"},
   {rank:9, name:"Patrick Cantlay",  tier:"Contender",prob:18,odds:"+3500",note:"Precision player; strong Sawgrass fit"},
-  {rank:10,name:"Cam Smith",        tier:"LIV Watch",prob:17,odds:"+4000",note:"2022 champion; elite putter when locked in"},
+  {rank:10,name:"Hideki Matsuyama", tier:"Contender",prob:14,odds:"+4500",note:"Strong iron play; Sawgrass contender"},
   {rank:11,name:"Collin Morikawa",  tier:"Elite",    prob:0, odds:"+1800",note:"❌ WD — withdrew after one hole"},
   {rank:12,name:"Matt Fitzpatrick", tier:"Contender",prob:16,odds:"+4500",note:"Elite iron play; accuracy over distance"},
   {rank:13,name:"Sepp Straka",      tier:"Value",    prob:15,odds:"+5500",note:"Undervalued; elite ball-striking"},
@@ -320,17 +320,26 @@ const TIERS = {
 let state = {
   view:"overview", ranker:DEFAULT_RANKER, aiNote:"", lastRefresh:"",
   apiKey:"", sortK:"sg", sortD:"desc", tourF:"all", search:"", selPlayer:null,
-  leaderboard:[], lbEvent:"", lbStatus:"", lbLoaded:false, field:[],
+  leaderboard:[], lbEvent:"", lbStatus:"", lbLoaded:false, field:[], conditions:"",
 };
 
 // ── STORAGE ───────────────────────────────────────────────────────────────
 function sGet(k){try{const v=localStorage.getItem("caddie_"+k);return v?JSON.parse(v):null;}catch{return null;}}
 function sSet(k,v){try{localStorage.setItem("caddie_"+k,JSON.stringify(v));}catch{}}
+// Players who are LIV-only and won't appear in PGA events
+const LIV_ONLY = ["cam smith","jon rahm","brooks koepka","dustin johnson","bryson dechambeau","joaquin niemann","phil mickelson","patrick reed","harold varner"];
+
 function loadState(){
-  const r=sGet("ranker"); if(r) state.ranker=r;
+  const r=sGet("ranker");
+  if(r){
+    const hasLIVOnly=r.some(p=>LIV_ONLY.includes(p.name.toLowerCase()));
+    if(!hasLIVOnly) state.ranker=r;
+    else { sSet("ranker",null); }
+  }
   const n=sGet("note"); if(n) state.aiNote=n;
   const lr=sGet("lr"); if(lr) state.lastRefresh=lr;
   const k=sGet("apiKey"); if(k) state.apiKey=k;
+  const cond=sGet("conditions"); if(cond) state.conditions=cond;
 }
 
 // ── HELPERS ───────────────────────────────────────────────────────────────
@@ -508,6 +517,23 @@ function renderOverview(container){
         <div style="font-family:'DM Mono',monospace;font-size:15px;color:#86efac;margin-top:5px;font-weight:600">${h(top.odds)}</div>
         <div style="font-size:10px;color:#6b8f76">consensus odds</div>
       </div>
+    </div>`;
+  }
+
+  // Course conditions card — shown after first Refresh
+  if(state.conditions){
+    html+=`<div style="background:#0f1a14;border:1px solid #1a2e20;border-radius:11px;padding:15px 18px;margin-bottom:16px;display:flex;gap:16px;align-items:flex-start">
+      <div style="font-size:22px;flex-shrink:0">🌿</div>
+      <div style="flex:1">
+        <div style="font-size:11px;color:#52b788;text-transform:uppercase;letter-spacing:.1em;font-family:'DM Mono',monospace;margin-bottom:5px">Course Conditions · ${h(state.lbEvent||"This Week")}</div>
+        <div style="font-size:13px;color:#c8ddd1;line-height:1.6">${h(state.conditions)}</div>
+        <div style="font-size:10px;color:#6b8f76;margin-top:6px">Sourced from live articles · last updated ${h(state.lastRefresh||"—")}</div>
+      </div>
+    </div>`;
+  } else {
+    html+=`<div style="background:#0f1a14;border:1px dashed #1a2e20;border-radius:11px;padding:14px 18px;margin-bottom:16px;display:flex;gap:14px;align-items:center">
+      <div style="font-size:20px">🌿</div>
+      <div style="font-size:13px;color:#6b8f76">Hit <strong style="color:#d4af37">Refresh Data</strong> to scan the web for current course conditions — rough thickness, green speed, wind, and player news — then factor them into rankings.</div>
     </div>`;
   }
 
@@ -763,54 +789,142 @@ function renderLeaderboard(container){
   container.innerHTML=html;
 }
 
+// ── MATCH ESPN NAME TO STATS DB ───────────────────────────────────────────
+function matchStats(espnName){
+  const nl=espnName.toLowerCase().trim();
+  // exact match first
+  let p=PLAYERS.find(x=>x.name.toLowerCase()===nl);
+  if(p) return p;
+  // last-name match
+  const last=nl.split(" ").pop();
+  p=PLAYERS.find(x=>x.name.toLowerCase().split(" ").pop()===last);
+  return p||null;
+}
+
 // ── PLAYERS ───────────────────────────────────────────────────────────────
 function renderPlayers(container){
+  // SOURCE OF TRUTH: ESPN field. Fall back to PLAYERS db if ESPN not loaded yet.
+  let fieldPlayers;
+  if(state.leaderboard && state.leaderboard.length>0){
+    // Build from live ESPN field — enrich with stats where available
+    fieldPlayers = state.leaderboard.map(c=>{
+      const stats = matchStats(c.name);
+      return {
+        // ESPN live data
+        espnName: c.name,
+        pos: c.pos,
+        score: c.score,
+        thru: c.thru,
+        isWD: c.isWD,
+        isCut: c.isCut,
+        posNum: c.posNum,
+        // Stats from our DB (may be null)
+        ...( stats ? {
+          id: stats.id,
+          f: stats.f,
+          name: stats.name,
+          tour: stats.tour,
+          owgr: stats.owgr,
+          sg: stats.sg,
+          app: stats.app,
+          ott: stats.ott,
+          atg: stats.atg,
+          putt: stats.putt,
+          drv: stats.drv,
+          gir: stats.gir,
+          avg: stats.avg,
+          fit: stats.fit,
+          prob: stats.prob,
+          odds: stats.odds,
+          sb: stats.sb,
+          sa: stats.sa,
+          age: stats.age,
+          books: stats.books,
+        } : {
+          id: null,
+          f: "🏌️",
+          name: c.name,
+          tour: "PGA",
+          owgr: 999,
+          sg: null, app: null, ott: null, atg: null, putt: null,
+          drv: null, gir: null, avg: null, fit: null, prob: null,
+          odds: null, sb: null, sa: null, age: null, books: null,
+        }),
+        hasStats: !!stats,
+      };
+    });
+  } else {
+    // ESPN not loaded yet — show our full PLAYERS db as placeholder
+    fieldPlayers = PLAYERS.map(p=>({...p, espnName:p.name, hasStats:true, isWD:false, isCut:false, pos:"—", score:"—", thru:"—", posNum:p.owgr}));
+  }
+
+  // Apply search filter
+  let fpl = fieldPlayers.filter(p=>!state.search || p.name.toLowerCase().includes(state.search.toLowerCase()));
+
+  // Sort
+  fpl.sort((a,b)=>{
+    const av=a[state.sortK]??( state.sortD==="asc"?Infinity:-Infinity );
+    const bv=b[state.sortK]??( state.sortD==="asc"?Infinity:-Infinity );
+    if(typeof av==="string") return state.sortD==="asc"?av.localeCompare(bv):bv.localeCompare(av);
+    return state.sortD==="asc"?av-bv:bv-av;
+  });
+
+  const haslive = state.leaderboard && state.leaderboard.length>0;
+  const fieldCount = state.leaderboard?.length||0;
+
   const cols=[
-    {k:"owgr",l:"#",align:"center",w:"44px"},{k:"name",l:"Player",align:"left"},
+    {k:"owgr",l:"OWGR",align:"center",w:"54px"},
+    {k:"name",l:"Player",align:"left"},
+    ...(haslive?[{k:"score",l:"Score",align:"center"},{k:"pos",l:"Pos",align:"center"}]:[]),
     {k:"sg",l:"SG Tot"},{k:"app",l:"SG App"},{k:"ott",l:"OTT"},{k:"atg",l:"ATG"},{k:"putt",l:"Putt"},
     {k:"drv",l:"Drive"},{k:"gir",l:"GIR%"},{k:"avg",l:"Avg"},{k:"fit",l:"Fit"},{k:"prob",l:"T10%"},
   ];
-  // Only show players who are in the live ESPN field (if we have field data)
-  const inLiveField=p=>{
-    if(!state.field||state.field.length===0) return true; // no field data yet, show all
-    return state.field.some(f=>f===p.name.toLowerCase().trim()||f.includes(p.name.split(" ").pop().toLowerCase()));
-  };
-  let fpl=[...PLAYERS]
-    .filter(inLiveField)
-    .filter(p=>state.tourF==="all"||p.tour===state.tourF)
-    .filter(p=>!state.search||p.name.toLowerCase().includes(state.search.toLowerCase()))
-    .sort((a,b)=>{const av=a[state.sortK]??0,bv=b[state.sortK]??0;if(typeof av==="string")return state.sortD==="asc"?av.localeCompare(bv):bv.localeCompare(av);return state.sortD==="asc"?av-bv:bv-av;});
 
   let html=`<div class="players-grid ${state.selPlayer?"with-panel":"no-panel"}">
     <div>
-      <input class="search-inp" id="player-search" placeholder="🔍  Search players…" value="${h(state.search)}"/>
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:13px">
+        <input class="search-inp" id="player-search" style="margin-bottom:0;flex:1" placeholder="🔍  Search ${fieldCount||"all"} players in field…" value="${h(state.search)}"/>
+        ${haslive?`<span style="font-size:11px;color:#86efac;white-space:nowrap;font-family:'DM Mono',monospace"><span class="live-dot"></span>${fieldCount} in field</span>`:`<span style="font-size:11px;color:#6b8f76">Loading field…</span>`}
+      </div>
       <div class="panel"><div style="overflow-x:auto"><table><thead><tr>`;
+
   cols.forEach(c=>{
     const arr=state.sortK===c.k?(state.sortD==="asc"?"↑":"↓"):"↓";
     html+=`<th data-k="${c.k}" style="text-align:${c.align||"center"};${c.w?"width:"+c.w:""};color:${state.sortK===c.k?"#f5d97a":"#6b8f76"}">${c.l} <span style="opacity:${state.sortK===c.k?1:.2}">${arr}</span></th>`;
   });
   html+=`<th style="text-align:center;width:80px">Odds</th></tr></thead><tbody>`;
+
+  const na=`<span style="color:#1a2e20">—</span>`;
+
   fpl.forEach(p=>{
-    const isSel=state.selPlayer?.id===p.id;
+    const isSel=state.selPlayer?.espnName===p.espnName;
     const rk=state.ranker.find(r=>r.name===p.name);
-    const isWD=rk?.note?.includes("❌ WD");
+    const isWD=p.isWD||(rk?.note?.includes("❌ WD"));
     const fitColor=p.fit>=8?"#86efac":p.fit>=6?"#d4af37":"#6b8f76";
     const fitBg=p.fit>=8?"rgba(82,183,136,.15)":p.fit>=6?"rgba(212,175,55,.1)":"transparent";
     const fitBd=p.fit>=8?"#52b788":p.fit>=6?"#d4af37":"#374151";
-    html+=`<tr data-pid="${p.id}" style="cursor:pointer;background:${isSel?"rgba(45,106,79,.2)":"transparent"};opacity:${isWD?.4:1}">
-      <td style="text-align:center;color:#6b8f76;font-family:'DM Mono',monospace;font-size:12px">${p.owgr}</td>
-      <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${p.f} ${h(p.name)}${isWD?`<span class="wd-badge">WD</span>`:""}</div><div style="font-size:10px;font-weight:600;color:${p.tour==="PGA"?"#60a5fa":"#f472b6"};margin-top:1px">${p.tour}</div></td>
-      <td style="text-align:center" class="${sgClass(p.sg)}">${p.sg.toFixed(2)}</td>
-      <td style="text-align:center" class="${sgClass(p.app)}">${p.app.toFixed(2)}</td>
-      <td style="text-align:center" class="${sgClass(p.ott)}">${p.ott.toFixed(2)}</td>
-      <td style="text-align:center" class="${sgClass(p.atg)}">${p.atg.toFixed(2)}</td>
-      <td style="text-align:center" class="${sgClass(p.putt)}">${p.putt.toFixed(2)}</td>
-      <td style="text-align:center;font-family:'DM Mono',monospace;font-size:12px;color:#6b8f76">${p.drv}</td>
-      <td style="text-align:center;font-family:'DM Mono',monospace;font-size:12px;color:${p.gir>72?"#86efac":"#6b8f76"}">${p.gir}%</td>
-      <td style="text-align:center;font-family:'DM Mono',monospace;font-size:12px;color:${p.avg<70?"#86efac":"#6b8f76"}">${p.avg}</td>
-      <td style="text-align:center"><span style="background:${fitBg};border:1px solid ${fitBd};color:${fitColor};padding:2px 7px;border-radius:9px;font-size:11px;font-family:'DM Mono',monospace">${p.fit}/10</span></td>
-      <td style="text-align:center;font-family:'DM Mono',monospace;font-size:13px;font-weight:700;color:${p.prob>=25?"#f5d97a":p.prob>=18?"#86efac":"#6b8f76"}">${p.prob}%</td>
-      <td style="text-align:center"><span class="odds-pill ${oddsClass(p.odds)}">${h(p.odds)}</span></td>
+    const probColor=p.prob>=25?"#f5d97a":p.prob>=18?"#86efac":"#6b8f76";
+    html+=`<tr data-ename="${h(p.espnName)}" style="cursor:pointer;background:${isSel?"rgba(45,106,79,.2)":"transparent"};opacity:${isWD?.35:p.isCut?.5:1}">
+      <td style="text-align:center;color:#6b8f76;font-family:'DM Mono',monospace;font-size:12px">${p.owgr<999?p.owgr:na}</td>
+      <td>
+        <div style="font-size:13px;font-weight:600;white-space:nowrap">${p.f} ${h(p.name)}${isWD?`<span class="wd-badge">WD</span>`:p.isCut?`<span class="used-badge" style="background:#555">MC</span>`:""}</div>
+        <div style="font-size:10px;font-weight:600;color:${p.tour==="PGA"?"#60a5fa":"#f472b6"};margin-top:1px">${p.tour}${!p.hasStats?` <span style="color:#6b8f76">· no stats</span>`:""}</div>
+      </td>
+      ${haslive?`
+        <td style="text-align:center"><span class="lb-score ${scoreColor(p.score)}">${fmtScore(p.score)}</span></td>
+        <td style="text-align:center"><span style="font-family:'DM Mono',monospace;font-size:12px;color:${p.pos==="1"?"#d4af37":"#6b8f76"}">${h(p.pos||"—")}</span></td>
+      `:""}
+      <td style="text-align:center" class="${p.sg!==null?sgClass(p.sg):""}">${p.sg!==null?p.sg.toFixed(2):na}</td>
+      <td style="text-align:center" class="${p.app!==null?sgClass(p.app):""}">${p.app!==null?p.app.toFixed(2):na}</td>
+      <td style="text-align:center" class="${p.ott!==null?sgClass(p.ott):""}">${p.ott!==null?p.ott.toFixed(2):na}</td>
+      <td style="text-align:center" class="${p.atg!==null?sgClass(p.atg):""}">${p.atg!==null?p.atg.toFixed(2):na}</td>
+      <td style="text-align:center" class="${p.putt!==null?sgClass(p.putt):""}">${p.putt!==null?p.putt.toFixed(2):na}</td>
+      <td style="text-align:center;font-family:'DM Mono',monospace;font-size:12px;color:#6b8f76">${p.drv!==null?p.drv:na}</td>
+      <td style="text-align:center;font-family:'DM Mono',monospace;font-size:12px;color:${p.gir>72?"#86efac":"#6b8f76"}">${p.gir!==null?p.gir+"%":na}</td>
+      <td style="text-align:center;font-family:'DM Mono',monospace;font-size:12px;color:${p.avg<70?"#86efac":"#6b8f76"}">${p.avg!==null?p.avg:na}</td>
+      <td style="text-align:center">${p.fit!==null?`<span style="background:${fitBg};border:1px solid ${fitBd};color:${fitColor};padding:2px 7px;border-radius:9px;font-size:11px;font-family:'DM Mono',monospace">${p.fit}/10</span>`:na}</td>
+      <td style="text-align:center;font-family:'DM Mono',monospace;font-size:13px;font-weight:700;color:${probColor}">${p.prob!==null?p.prob+"%":na}</td>
+      <td style="text-align:center">${p.odds?`<span class="odds-pill ${oddsClass(p.odds)}">${h(p.odds)}</span>`:na}</td>
     </tr>`;
   });
   html+=`</tbody></table></div></div></div>`;
@@ -818,30 +932,36 @@ function renderPlayers(container){
   if(state.selPlayer){
     const p=state.selPlayer;
     const rk=state.ranker.find(r=>r.name===p.name);
-    const isWD=rk?.note?.includes("❌ WD");
+    const isWD=p.isWD||(rk?.note?.includes("❌ WD"));
     html+=`<div id="player-panel">
       <div style="display:flex;justify-content:space-between;margin-bottom:12px">
-        <div><div style="font-size:15px;font-weight:700">${p.f} ${h(p.name)}${isWD?`<span class="wd-badge">WD</span>`:""}</div>
-        <div style="font-size:11px;color:#6b8f76;margin-top:2px">OWGR #${p.owgr} · ${p.tour} · Age ${p.age}</div></div>
+        <div>
+          <div style="font-size:15px;font-weight:700">${p.f} ${h(p.name)}${isWD?`<span class="wd-badge">WD</span>`:""}</div>
+          <div style="font-size:11px;color:#6b8f76;margin-top:2px">${p.owgr<999?`OWGR #${p.owgr} · `:``}${p.tour}${p.age?` · Age ${p.age}`:""}</div>
+        </div>
         <button id="close-panel" style="background:none;border:none;color:#6b8f76;font-size:20px;cursor:pointer;line-height:1">×</button>
       </div>
-      ${renderRadar(p)}
+      ${p.hasStats ? renderRadar(p) : `<div style="text-align:center;padding:24px 16px;color:#6b8f76;font-size:12px;border:1px dashed #1a2e20;border-radius:8px;margin-bottom:10px">Detailed stats not in database yet.<br/>Hit <strong style="color:#d4af37">Refresh</strong> for AI analysis.</div>`}
       <div class="stat-mini-grid">
-        ${[["SG Total",p.sg.toFixed(2)],["SG App",p.app.toFixed(2)],["Drive",p.drv+"y"],["GIR",p.gir+"%"],["Scoring",p.avg],["Fit",p.fit+"/10"],["T10%",p.prob+"%"],["Odds",p.odds]].map(([l,v])=>`
-          <div class="stat-mini"><div class="stat-mini-label">${l}</div><div class="stat-mini-val">${h(String(v))}</div></div>`).join("")}
+        ${p.hasStats
+          ? [["SG Total",p.sg.toFixed(2)],["SG App",p.app.toFixed(2)],["Drive",p.drv+"y"],["GIR",p.gir+"%"],["Scoring",p.avg],["Fit",p.fit+"/10"],["T10%",(rk?.prob??p.prob)+"%"],["Odds",p.odds||"—"]].map(([l,v])=>`<div class="stat-mini"><div class="stat-mini-label">${l}</div><div class="stat-mini-val">${h(String(v))}</div></div>`).join("")
+          : [["Live Pos",p.pos||"—"],["Score",fmtScore(p.score)||"—"],["Thru",p.thru||"—"],["Caddie T10",rk?rk.prob+"%":"—"]].map(([l,v])=>`<div class="stat-mini"><div class="stat-mini-label">${l}</div><div class="stat-mini-val">${h(String(v))}</div></div>`).join("")
+        }
       </div>
-      <div style="padding:8px 11px;background:rgba(212,175,55,.05);border-radius:7px;border:1px solid rgba(212,175,55,.18);margin-bottom:10px">
-        <div style="font-size:10px;color:#6b8f76;margin-bottom:3px">TPC Sawgrass History</div>
-        <div style="font-size:12px">Best: <strong style="color:${p.sb==="W"?"#d4af37":"#e8f0eb"}">${p.sb==="W"?"🏆 Winner":p.sb}</strong> · Avg Finish: ${p.sa}</div>
-      </div>
-      <div style="margin-bottom:6px;font-size:11px;color:#6b8f76;text-transform:uppercase;font-family:'DM Mono',monospace;letter-spacing:.06em">Odds by Book</div>
-      <div class="odds-row">
-        ${[["DK",p.books.dk],["FD",p.books.fd],["MGM",p.books.mgm],["B365",p.books.bet365]].map(([l,o])=>`
-          <div style="flex:1;text-align:center;background:rgba(255,255,255,.03);border-radius:7px;padding:7px 4px;border:1px solid #1a2e20">
-            <div style="font-size:9px;color:#6b8f76;margin-bottom:3px">${l}</div>
-            <div style="font-family:'DM Mono',monospace;font-size:13px;font-weight:700;color:#86efac">${h(o)}</div>
-          </div>`).join("")}
-      </div>
+      ${p.hasStats&&p.sb!=null?`
+        <div style="padding:8px 11px;background:rgba(212,175,55,.05);border-radius:7px;border:1px solid rgba(212,175,55,.18);margin-bottom:10px">
+          <div style="font-size:10px;color:#6b8f76;margin-bottom:3px">TPC Sawgrass History</div>
+          <div style="font-size:12px">Best: <strong style="color:${p.sb==="W"?"#d4af37":"#e8f0eb"}">${p.sb==="W"?"🏆 Winner":p.sb}</strong> · Avg Finish: ${p.sa}</div>
+        </div>`:""}
+      ${p.books?`
+        <div style="margin-bottom:6px;font-size:11px;color:#6b8f76;text-transform:uppercase;font-family:'DM Mono',monospace;letter-spacing:.06em">Win Odds by Book</div>
+        <div class="odds-row">
+          ${[["DK",p.books.dk],["FD",p.books.fd],["MGM",p.books.mgm],["B365",p.books.bet365]].map(([l,o])=>`
+            <div style="flex:1;text-align:center;background:rgba(255,255,255,.03);border-radius:7px;padding:7px 4px;border:1px solid #1a2e20">
+              <div style="font-size:9px;color:#6b8f76;margin-bottom:3px">${l}</div>
+              <div style="font-family:'DM Mono',monospace;font-size:13px;font-weight:700;color:#86efac">${h(o)}</div>
+            </div>`).join("")}
+        </div>`:""}
     </div>`;
   }
   html+=`</div>`;
@@ -852,8 +972,14 @@ function renderPlayers(container){
   container.querySelectorAll("th[data-k]").forEach(th=>{
     th.onclick=()=>{if(state.sortK===th.dataset.k)state.sortD=state.sortD==="asc"?"desc":"asc";else{state.sortK=th.dataset.k;state.sortD="desc";}renderPlayers(container);};
   });
-  container.querySelectorAll("tr[data-pid]").forEach(tr=>{
-    tr.onclick=(e)=>{if(e.target.closest("button"))return;const pid=parseInt(tr.dataset.pid);const pl=PLAYERS.find(p=>p.id===pid);state.selPlayer=(state.selPlayer?.id===pid)?null:pl;renderPlayers(container);};
+  container.querySelectorAll("tr[data-ename]").forEach(tr=>{
+    tr.onclick=(e)=>{
+      if(e.target.closest("button"))return;
+      const ename=tr.dataset.ename;
+      const clicked=fpl.find(p=>p.espnName===ename);
+      state.selPlayer=(state.selPlayer?.espnName===ename)?null:clicked;
+      renderPlayers(container);
+    };
   });
   const cp=container.querySelector("#close-panel");
   if(cp) cp.onclick=()=>{state.selPlayer=null;renderPlayers(container);};
@@ -929,59 +1055,165 @@ async function fetchLiveTournamentData(){
   }catch(e){return null;}
 }
 
+// ── AGENTIC REFRESH (web search + live scores → rankings) ─────────────────
+// Runs a multi-turn loop: Claude searches the web for course conditions,
+// reads articles, then uses all that context to generate final rankings.
+async function callClaude(messages, tools, system){
+  const body={
+    model:"claude-sonnet-4-20250514",
+    max_tokens:4000,
+    tools:tools||[],
+    messages,
+  };
+  if(system) body.system=system;
+  const res=await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",
+    headers:{
+      "Content-Type":"application/json",
+      "x-api-key":state.apiKey,
+      "anthropic-version":"2023-06-01",
+      "anthropic-dangerous-direct-browser-access":"true",
+    },
+    body:JSON.stringify(body),
+  });
+  return await res.json();
+}
+
 document.getElementById("btn-refresh").onclick=async function(){
   if(!state.apiKey){openSettings();return;}
-  const btn=this;btn.disabled=true;
-  btn.innerHTML='<span class="spinning">🔄</span> Fetching scores…';
-  const live=await fetchLiveTournamentData();
-  btn.innerHTML='<span class="spinning">🔄</span> Updating rankings…';
+  const btn=this;
+  btn.disabled=true;
+
+  const statusSteps=[
+    "🌐 Fetching live scores…",
+    "🔍 Searching course conditions…",
+    "📰 Reading articles…",
+    "🧠 Analysing field…",
+    "⛳ Generating rankings…",
+  ];
+  let stepIdx=0;
+  btn.innerHTML=`<span class="spinning">🔄</span> ${statusSteps[0]}`;
+  const bumpStep=()=>{ stepIdx=Math.min(stepIdx+1,statusSteps.length-1); btn.innerHTML=`<span class="spinning">🔄</span> ${statusSteps[stepIdx]}`; };
+
+  // Step 1: ESPN live scores
+  const live = await fetchLiveTournamentData();
+  bumpStep();
+
   try{
-    const liveBlock=live?live.summary:"Live data unavailable — use current SG stats for ranking.";
-    const fieldNames=state.field.length>0
-      ? `\nACTUAL TOURNAMENT FIELD (only rank players from this list):\n${state.leaderboard.map(c=>c.name).join(", ")}\n`
+    const liveBlock = live ? live.summary : "Live data unavailable — use current SG stats.";
+    const fieldNames = state.leaderboard.length>0
+      ? `CONFIRMED FIELD (only use players from this list):\n${state.leaderboard.map(c=>c.name).join(", ")}`
       : "";
-    const prompt=`You are a PGA Tour analytics AI updating rankings for a golf pick'em bracket.
+    const eventName = state.lbEvent || (live?.eventName) || "current PGA Tour event";
 
-=== LIVE DATA ===
+    // Web search tool definition
+    const webSearchTool = {
+      type:"web_search_20250305",
+      name:"web_search",
+    };
+
+    // Initial prompt — Claude will search before ranking
+    const systemPrompt = `You are a PGA Tour analytics AI for a golf pick'em bracket app. 
+Your job is to research current course conditions and player form using web search, then produce accurate top-15 rankings.
+
+IMPORTANT RULES:
+- ONLY rank players who are in the confirmed tournament field
+- Never include LIV-only players in PGA Tour events
+- Withdrawn players: rank last with prob=0, note="❌ WD"
+- Missed cut players: exclude or very low prob
+- Weight your analysis: 40% live leaderboard position, 30% current course conditions, 30% season SG stats
+
+STAT WEIGHTS FOR RANKING (when pre-tournament or early rounds):
+- SG:Approach = most important (accuracy to greens wins at Sawgrass)
+- GIR% = second most important
+- Course history = significant factor
+- If rough is thick → favour high GIR% and accuracy players, penalise big hitters who miss fairways
+- If greens are firm/fast → boost elite putters
+- If windy → boost ball-strikers, penalise high ball-flight players
+- If soft/wet → distance advantage matters more`;
+
+    const userMessage = `Research and rank the field for ${eventName} right now.
+
+=== LIVE TOURNAMENT DATA ===
 ${liveBlock}
-${fieldNames}
-=== TASK ===
-Generate top-15 player rankings using ONLY players confirmed in the tournament field above.
-Rules:
-- ONLY include players who are in the actual field — do NOT include LIV-only players or anyone not listed
-- WITHDRAWN players: set prob=0, note="❌ WD — withdrew"
-- Missed cut: very low prob or exclude
-- Leading players in live tournament: boost prob significantly
-- If pre-tournament: rank by SG:Approach (#1 stat for Sawgrass), GIR%, course fit
-- Be realistic with probabilities — a current leader in R4 should have prob 70-90%
 
-Return ONLY valid JSON (no markdown):
-{"note":"1 sentence live storyline","players":[{"rank":1,"name":"Full Name","tier":"Elite","prob":42,"odds":"+480","note":"under 12 words current status"}]}
+${fieldNames}
+
+INSTRUCTIONS:
+1. First, search the web for CURRENT course conditions at ${eventName} — search for things like rough thickness, green speed, wind forecast, pin positions, and any player news/injuries
+2. Search for recent player form, any notable hot streaks or struggles this week
+3. Then produce your final top-15 rankings factoring in everything you found
+
+After your research, return ONLY a valid JSON object (no markdown fences, no explanation):
+{"note":"1 sentence storyline mentioning key course condition or trend you found","conditions":"2-3 sentence summary of what you found about course conditions","players":[{"rank":1,"name":"Full Name","tier":"Elite","prob":42,"odds":"+480","note":"12 words max about why they rank here"}]}
 
 Tiers: Elite, Contender, Hot Form, Sleeper, Value, LIV Watch, Specialist
-Exactly 15 players. prob is integer 0-99.`;
+Exactly 15 players. prob is integer 0-99. Be realistic — R4 leader = 70-90% prob.`;
 
-    const res=await fetch("https://api.anthropic.com/v1/messages",{
-      method:"POST",
-      headers:{"Content-Type":"application/json","x-api-key":state.apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1400,messages:[{role:"user",content:prompt}]})
-    });
-    const d=await res.json();
-    const txt=(d.content||[]).map(b=>b.text||"").join("");
-    const m=txt.match(/\{[\s\S]*\}/);
-    if(m){
-      const parsed=JSON.parse(m[0]);
+    // Multi-turn agentic loop
+    // Anthropic's web_search tool is server-side — results come back embedded in
+    // the response content alongside the tool_use block. We just keep appending
+    // assistant turns and looping until stop_reason === "end_turn".
+    let messages=[{role:"user",content:userMessage}];
+    let finalText="";
+    let turns=0;
+    const MAX_TURNS=8;
+
+    while(turns<MAX_TURNS){
+      turns++;
+      const response=await callClaude(messages,[webSearchTool],systemPrompt);
+      if(!response.content||response.error) break;
+
+      const stopReason=response.stop_reason;
+
+      // Capture any text blocks from this turn
+      const textBlocks=response.content.filter(b=>b.type==="text");
+      if(textBlocks.length) finalText=textBlocks.map(b=>b.text).join("");
+
+      // Done — Claude produced final answer
+      if(stopReason==="end_turn"||stopReason==="stop_sequence") break;
+
+      // Tool use — append assistant turn and loop (results are embedded server-side)
+      if(stopReason==="tool_use"){
+        bumpStep();
+        messages.push({role:"assistant",content:response.content});
+        // Small pause between search turns
+        await new Promise(r=>setTimeout(r,400));
+        continue;
+      }
+
+      break;
+    }
+
+    bumpStep(); // "Generating rankings…"
+
+    // Parse the final JSON out of the last text response
+    const jsonMatch = finalText.match(/\{[\s\S]*"players"[\s\S]*\}/);
+    if(jsonMatch){
+      const parsed = JSON.parse(jsonMatch[0]);
       if(parsed.players?.length){
-        state.ranker=parsed.players;sSet("ranker",parsed.players);
-        state.aiNote=parsed.note||"";sSet("note",state.aiNote);
+        state.ranker=parsed.players;
+        sSet("ranker",parsed.players);
+        state.aiNote=parsed.note||"";
+        sSet("note",state.aiNote);
+        // Store course conditions summary for display
+        if(parsed.conditions){
+          state.conditions=parsed.conditions;
+          sSet("conditions",parsed.conditions);
+        }
         const now=new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"})+" · "+new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"});
-        state.lastRefresh=now;sSet("lr",now);
+        state.lastRefresh=now;
+        sSet("lr",now);
       }
     }
-  }catch(e){state.aiNote="Error — check API key in Settings.";}
-  // also refresh ESPN leaderboard data
+  }catch(e){
+    console.error(e);
+    state.aiNote="Error — check API key in Settings.";
+  }
+
   await loadLeaderboard();
-  btn.disabled=false;btn.innerHTML='🔄 Refresh Data';
+  btn.disabled=false;
+  btn.innerHTML="🔄 Refresh Data";
   render();
 };
 
