@@ -180,6 +180,7 @@ tr:hover td{background:rgba(45,106,79,.12)}
     </div>
 
     <div class="sidebar-footer">
+      <div id="sb-confidence" style="margin-bottom:6px"></div>
       <button class="btn-refresh" id="btn-refresh">🔄 Refresh Data</button>
       <button class="btn-refresh" id="btn-send-email" style="background:linear-gradient(135deg,#1a3c5e,#0d2238);border-color:#2563eb">📧 Send Report</button>
       <button class="btn-settings" id="btn-settings">⚙️ API Settings <span id="key-check"></span></button>
@@ -407,9 +408,8 @@ let state = {
   view:"overview", ranker:[], aiNote:"", lastRefresh:"",
   apiKey:"", email:"", sortK:"sg", sortD:"desc", tourF:"all", search:"", selPlayer:null,
   leaderboard:[], lbEvent:"", lbStatus:"", lbLoaded:false, field:[], conditions:"", xInsights:"", currentRound:0,
-  pastResults:[], lastEvent:"", rankerEvent:"",
-  preTourneyRankings:{},   // keyed by event name — frozen before R1 starts
-  autoLoggedEvents:[],     // events already auto-logged so we don't duplicate
+  pastResults:[], lastEvent:"", rankerEvent:"", confidence:0,
+  preTourneyRankings:{}, autoLoggedEvents:[],
 };
 
 // ── STORAGE ───────────────────────────────────────────────────────────────
@@ -432,6 +432,7 @@ function loadState(){
   const cond=sGet("conditions"); if(cond) state.conditions=cond;
   const xi=sGet("xInsights"); if(xi) state.xInsights=xi;
   const re=sGet("rankerEvent"); if(re) state.rankerEvent=re;
+  const conf=sGet("confidence"); if(conf) state.confidence=conf;
   const ptr=sGet("preTourneyRankings"); if(ptr) state.preTourneyRankings=ptr;
   const ale=sGet("autoLoggedEvents"); if(ale) state.autoLoggedEvents=ale;
   const pr=sGet("pastResults"); state.pastResults=pr||[];
@@ -805,6 +806,9 @@ function renderSidebar(){
   });
   document.getElementById("key-check").textContent=state.apiKey?"✓":"";
   document.getElementById("last-refresh").textContent=state.lastRefresh||"";
+  // Confidence bar in sidebar
+  const confEl=document.getElementById("sb-confidence");
+  if(confEl&&state.confidence>0) confEl.innerHTML=confidenceMeterHTML(state.confidence,true);
   const aiEl=document.getElementById("ai-note");
   if(state.aiNote){aiEl.style.display="block";aiEl.textContent="⚡ "+state.aiNote;}
   else aiEl.style.display="none";
@@ -876,7 +880,7 @@ function renderOverview(container){
       html+=`<div style="display:flex;gap:12px;align-items:flex-start;border-left:1px solid #1a2e20;padding-left:16px">
         <div style="font-size:20px;flex-shrink:0">🐦</div>
         <div>
-          <div style="font-size:10px;color:#60a5fa;text-transform:uppercase;letter-spacing:.1em;font-family:'DM Mono',monospace;margin-bottom:4px">Klos & Mayo Picks</div>
+          <div style="font-size:10px;color:#60a5fa;text-transform:uppercase;letter-spacing:.1em;font-family:'DM Mono',monospace;margin-bottom:4px">Expert Picks</div>
           <div style="font-size:12px;color:#c8ddd1;line-height:1.6">${h(state.xInsights)}</div>
         </div>
       </div>`;
@@ -885,7 +889,7 @@ function renderOverview(container){
   } else {
     html+=`<div style="background:#0f1a14;border:1px dashed #1a2e20;border-radius:11px;padding:14px 18px;margin-bottom:16px;display:flex;gap:14px;align-items:center">
       <div style="font-size:20px">🌿</div>
-      <div style="font-size:13px;color:#6b8f76">Hit <strong style="color:#d4af37">Refresh Data</strong> to scan the web for course conditions, Ron Klos and Pat Mayo's picks, and live scores — then update rankings automatically.</div>
+      <div style="font-size:13px;color:#6b8f76">Hit <strong style="color:#d4af37">Refresh Data</strong> to scan the web for course conditions, expert picks and live scores — then update rankings automatically.</div>
     </div>`;
   }
 
@@ -960,7 +964,34 @@ function renderOverview(container){
 }
 
 // ── RANKER ────────────────────────────────────────────────────────────────
-function renderRanker(container){
+function confidenceMeterHTML(conf, compact){
+  const c=conf||0;
+  const color=c>=80?"#86efac":c>=60?"#f5d97a":c>=40?"#d4af37":"#f87171";
+  const label=c>=85?"Very High":c>=70?"High":c>=55?"Moderate":c>=40?"Building":"Low — refresh for more data";
+  const desc=c>=85?"Live scores + conditions + expert analysis all factored in":
+             c>=70?"Course conditions and form data incorporated":
+             c>=55?"SG stats + some conditions data":
+             c>=40?"Based on SG stats and course fit only":
+             "Hit Refresh to generate rankings";
+  if(compact){
+    return `<div style="display:flex;align-items:center;gap:7px">
+      <div style="flex:1;height:5px;background:rgba(255,255,255,.06);border-radius:3px;overflow:hidden">
+        <div style="height:100%;width:${c}%;background:${color};border-radius:3px;transition:width .6s ease"></div>
+      </div>
+      <span style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700;color:${color};min-width:30px">${c}%</span>
+    </div>`;
+  }
+  return `<div style="background:#0f1a14;border:1px solid ${c>=80?"rgba(82,183,136,.3)":c>=50?"rgba(212,175,55,.2)":"rgba(239,68,68,.2)"};border-radius:10px;padding:12px 16px;margin-bottom:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <div style="font-size:11px;color:#6b8f76;text-transform:uppercase;letter-spacing:.08em;font-family:'DM Mono',monospace">Prediction Confidence</div>
+      <div style="font-family:'DM Mono',monospace;font-size:15px;font-weight:700;color:${color}">${c}% — ${label}</div>
+    </div>
+    <div style="height:8px;background:rgba(255,255,255,.05);border-radius:4px;overflow:hidden;margin-bottom:7px">
+      <div style="height:100%;width:${c}%;background:linear-gradient(90deg,${c>=80?"#52b788,#86efac":c>=60?"#d4af37,#f5d97a":"#ef4444,#f87171"});border-radius:4px;transition:width .8s ease"></div>
+    </div>
+    <div style="font-size:11px;color:#6b8f76">${desc}${c>0&&c<85?" — hit Refresh to increase accuracy":""}</div>
+  </div>`;
+}
   const currEvent=SCHEDULE.find(s=>s.curr);
   const currName=currEvent?.name||"this week's tournament";
   const needsRefresh=!state.ranker.length||!state.rankerEvent||(state.rankerEvent&&state.rankerEvent!==currName);
@@ -979,12 +1010,15 @@ function renderRanker(container){
     html+=`<div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:11px;padding:20px 24px;text-align:center;margin-bottom:16px">
       <div style="font-size:28px;margin-bottom:10px">⛳</div>
       <div style="font-size:15px;font-weight:700;color:#fca5a5;margin-bottom:6px">No rankings for ${h(currName)} yet</div>
-      <div style="font-size:13px;color:#6b8f76;max-width:420px;margin:0 auto 14px">Hit <strong style="color:#d4af37">Refresh Data</strong> to search current course conditions, pull Ron Klos & Pat Mayo's picks, and generate this week's rankings.</div>
+      <div style="font-size:13px;color:#6b8f76;max-width:420px;margin:0 auto 14px">Hit <strong style="color:#d4af37">Refresh Data</strong> to analyse the field from SG stats, course fit, and current conditions.</div>
       <button onclick="document.getElementById('btn-refresh').click()" style="padding:10px 24px;background:linear-gradient(135deg,#2d6a4f,#1a3c2e);border:none;border-radius:8px;color:#fff;font-size:14px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif">🔄 Generate Rankings Now</button>
     </div>`;
     container.innerHTML=html;
     return;
   }
+
+  // Confidence meter
+  html+=confidenceMeterHTML(state.confidence, false);
 
   const maxP=Math.max(...state.ranker.map(x=>x.prob||0),1);
   const tkeys=Object.keys(TIERS);
@@ -1610,7 +1644,7 @@ function renderMethodology(container){
 
     <div style="background:linear-gradient(135deg,rgba(212,175,55,.08),rgba(45,106,79,.1));border:1px solid rgba(212,175,55,.3);border-radius:14px;padding:22px 26px;margin-bottom:22px">
       <div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:700;color:#f5d97a;margin-bottom:8px">How Caddie Builds Rankings</div>
-      <div style="font-size:13px;color:#c8ddd1;line-height:1.7">Rankings are generated fresh each week by combining four data sources: strokes-gained stats, live course conditions sourced from current articles, expert X posts (Ron Klos, Pat Mayo), and past tournament results. Each source is weighted differently depending on what stage of the week it is.</div>
+      <div style="font-size:13px;color:#c8ddd1;line-height:1.7">Rankings are generated fresh each week by combining four data sources: strokes-gained stats, live course conditions sourced from current articles, expert analysis from golf analysts, and past tournament results. Each source is weighted differently depending on what stage of the week it is.</div>
     </div>
 
     <!-- Weighting breakdown -->
@@ -1625,7 +1659,7 @@ function renderMethodology(container){
           {pct:20,label:"Live Leaderboard Position",color:"#d4af37",
            desc:"During a tournament, position becomes increasingly dominant. By R3/R4 a leader has 80–90% T10 probability regardless of their pre-tournament ranking. Early rounds get less weight since variance is high."},
           {pct:15,label:"Expert Analysis & Past Results",color:"#c4b5fd",
-           desc:"Ron Klos and Pat Mayo X posts are searched each week for picks and fades. Past Caddie results feed back into the model — if we consistently missed a player type, they get upweighted next time."},
+           desc:"Expert golf analyst picks and fades are searched each week. Past Caddie results feed back into the model — if we consistently missed a player type, they get upweighted next time."},
         ].map(w=>`
           <div style="padding:14px 0;border-bottom:1px solid #1a2e20;display:flex;gap:16px;align-items:flex-start">
             <div style="min-width:52px;text-align:center">
@@ -1894,7 +1928,7 @@ document.getElementById("btn-refresh").onclick=async function(){
   const btn=this;
   btn.disabled=true;
 
-  const steps=["🌐 Live scores…","🔍 Conditions…","🐦 Expert picks…","🧠 Analysing…","⛳ Rankings…"];
+  const steps=["🌐 Live scores…","🧠 Crunching stats…","🔍 Scanning web…","⛳ Finalising…"];
   let si=0;
   const setStep=s=>{si=Math.min(s,steps.length-1);btn.innerHTML=`<span class="spinning">🔄</span> ${steps[si]}`;};
   setStep(0);
@@ -1903,62 +1937,77 @@ document.getElementById("btn-refresh").onclick=async function(){
   setStep(1);
 
   try{
-    const liveBlock=live?live.summary:"Pre-tournament — use SG stats and course fit.";
+    const liveBlock=live?live.summary:"Pre-tournament.";
     const fieldList=state.leaderboard.length>0
-      ?`\nCONFIRMED FIELD — ONLY rank these players:\n${state.leaderboard.map(c=>c.name).join(", ")}\n`
+      ?`\nCONFIRMED FIELD — ONLY rank players from this list:\n${state.leaderboard.map(c=>c.name).join(", ")}\n`
       :"";
     const eventName=state.lbEvent||(live?.eventName)||"current PGA Tour event";
-    const courseName=SCHEDULE.find(s=>s.curr)?.course||"TPC Sawgrass";
+    const currSched=SCHEDULE.find(s=>s.curr);
+    const courseName=currSched?.course||"TPC Sawgrass";
+    const round=state.currentRound||0;
+    const isPreTourney=round===0;
+    const yr=new Date().getFullYear();
 
-    // Build past performance context for AI to learn from
+    // Confidence score — based on how much data we have
+    // Starts low (SG-only), rises as conditions + expert data + live scores come in
+    const baseConfidence=isPreTourney?45:round===1?55:round===2?65:round===3?80:90;
+
+    // Build past performance context
     const perfContext=state.pastResults.length>0?`
-HISTORICAL CADDIE PERFORMANCE (learn from these to improve rankings):
+PAST CADDIE PERFORMANCE — learn from these patterns:
 ${state.pastResults.map(r=>{
-  const hits=r.caddieRankings?.filter(p=>r.actualTop10?.includes(p.name))||[];
-  const misses=r.caddieRankings?.filter(p=>!r.actualTop10?.includes(p.name))||[];
-  const surprises=r.actualTop10?.filter(n=>!r.caddieRankings?.find(p=>p.name===n))||[];
-  return `• ${r.tournament}: Caddie Pick "${r.caddiePick}" ${r.actualTop10?.includes(r.caddiePick)?"✅ HIT":"❌ MISSED"}. Actual winner: ${r.winner}. Ranked players who hit T10: ${hits.map(p=>p.name).join(", ")||"none"}. Surprises we missed: ${surprises.join(", ")||"none"}.`;
+  const hits=(r.caddieRankings||[]).filter(p=>(r.actualTop10||[]).includes(p.name));
+  const surprises=(r.surprises||[]).map(s=>s.name);
+  return `• ${r.tournament} (${r.course||""}): Winner ${r.winner}. Our hits: ${hits.map(p=>p.name).join(", ")||"none"}. Surprises we missed: ${surprises.join(", ")||"none"}.`;
 }).join("\n")}
-USE THIS: If a player type consistently surprised us (e.g. Copperhead specialists, grinders), weight them higher. If we consistently over-ranked certain profiles, adjust downward.`:"";
+Apply these lessons: boost player types that have surprised us, temper profiles we over-ranked.`:"";
 
-    const systemPrompt=`You are a PGA Tour analytics AI for a golf pick'em bracket.
-Research course conditions and expert analysis via web search, then produce precise top-15 rankings.
+    const systemPrompt=`You are a PGA Tour analytics AI powering a golf pick'em bracket tool.
 
-RULES:
-- ONLY include players in the confirmed field list. Never include LIV-only players.
+Your PRIMARY job is to generate rankings from strokes-gained stats and course fit — this happens regardless of whether web search returns anything useful. Web search supplements your analysis, it does not gate it.
+
+MANDATORY RULES:
+- ONLY rank players in the confirmed field. Never include LIV-only players not in field.
 - Withdrawn: prob=0, note="❌ WD"
 - Missed cut: prob=0 or exclude
-- Weight: 35% leaderboard position (if in progress), 35% course conditions & fit, 30% season SG stats + expert analysis
-${perfContext}
-STAT PRIORITIES:
-SG:Approach > GIR% > Course history > SG:Putting > OTT
-Thick rough → boost GIR%, penalise low-accuracy bombers
-Fast/firm greens → boost SG:Putting elite
-Wind → boost accurate ball-strikers
-Soft/wet → distance matters more`;
+- Always produce exactly 15 ranked players
+- Include a "confidence" integer 0-100 in your JSON output reflecting data quality this week
 
-    const userMessage=`Research and rank the field for ${eventName} at ${courseName}.
+WEIGHTING (pre-tournament):
+40% SG:Approach + GIR% (primary predictors)
+25% Course fit score + course history
+20% Current form / recent finishes
+15% Conditions + expert analysis from web
+
+WEIGHTING (in-tournament):
+40% Current leaderboard position
+30% Score relative to field
+20% SG:Approach for remaining holes
+10% Course history
+${perfContext}
+CONDITION ADJUSTMENTS:
+Thick rough → reward high GIR%, punish bombers with low accuracy
+Fast greens → reward elite putters
+Wind → reward low ball-flight accurate players
+Soft conditions → distance advantage matters more`;
+
+    const userMessage=`Generate rankings for ${eventName} at ${courseName}.
 
 === LIVE DATA ===
 ${liveBlock}
 ${fieldList}
-RESEARCH STEPS (use web_search for each):
-1. Search: "${eventName} course conditions ${new Date().getFullYear()} rough greens wind"
-2. Search: "site:x.com ronklos ${eventName}" — Ron Klos golf picks and analysis
-3. Search: "site:x.com patmayo ${eventName}" — Pat Mayo golf expert picks
-4. Search: "${eventName} player form injuries news ${new Date().getFullYear()}"
+RESEARCH TASKS — use web_search for each (rankings must be produced even if searches fail):
+1. "${eventName} ${yr} course conditions rough greens wind stimpmeter"
+2. "${eventName} ${yr} golf picks expert analysis sleepers"
+3. "${eventName} ${yr} player injuries withdrawals form"
 
-After all searches, output ONLY valid JSON — no markdown, no extra text:
-{"note":"one sentence live storyline with key finding","conditions":"2-3 sentences on course conditions this week — rough, greens, wind, firmness","xInsights":"1-2 sentences on what Ron Klos or Pat Mayo flagged","players":[{"rank":1,"name":"Full Name","tier":"Elite","prob":42,"odds":"+480","note":"max 12 words why they rank here"}]}
+After researching, output ONLY valid JSON (no markdown fences, no preamble):
+{"note":"one sentence key insight","conditions":"2-3 sentences: rough status, green speed, wind, firmness","expertInsights":"1-2 sentences from expert analysis found (no names of specific accounts)","confidence":${baseConfidence},"players":[{"rank":1,"name":"Full Name","tier":"Elite","prob":42,"odds":"+480","note":"max 12 words why they rank here"}]}
 
 Tiers: Elite|Contender|Hot Form|Sleeper|Value|LIV Watch|Specialist
-Exactly 15 players. prob 0-99. R4 leader = 80-90% prob.`;
+prob is integer 0-99. ${round>=3?"R3/R4 leader should have prob 75-90%.":"Be realistic across the field."}
+IMPORTANT: Output the JSON immediately after your research. Do not wait for perfect information.`;
 
-    // ── TOOL USE LOOP ──
-    // web_search_20250305 is server-side: Anthropic executes the search and embeds
-    // tool_result blocks in the SAME response as the tool_use request.
-    // So on stop_reason="tool_use", we append the full response as an assistant turn,
-    // then add a lightweight "continue" user turn, and call again.
     const webSearch={type:"web_search_20250305",name:"web_search"};
     let messages=[{role:"user",content:userMessage}];
     let finalText="";
@@ -1975,34 +2024,28 @@ Exactly 15 players. prob 0-99. R4 leader = 80-90% prob.`;
       }
       if(!resp.content) break;
 
-      // Grab any text in this response
       resp.content.filter(b=>b.type==="text").forEach(b=>{ finalText=b.text; });
 
       if(resp.stop_reason==="end_turn"||resp.stop_reason==="stop_sequence") break;
 
       if(resp.stop_reason==="tool_use"){
-        if(turns===2) setStep(2); // searching expert picks
-        else if(turns===3) setStep(3); // analysing
-        // Append full assistant response (contains tool_use + embedded tool_result)
+        if(turns===2) setStep(2);
+        else if(turns===3) setStep(3);
         messages.push({role:"assistant",content:resp.content});
-        // API requires user turn after assistant — send minimal continuation
-        messages.push({role:"user",content:[{type:"text",text:"Continue your research and then produce the final JSON rankings."}]});
+        messages.push({role:"user",content:[{type:"text",text:"Continue. Produce the final JSON rankings now."}]});
         await new Promise(r=>setTimeout(r,300));
         continue;
       }
       break;
     }
 
-    setStep(4);
+    setStep(3);
 
-    // Parse JSON from final response
     const jm=finalText.match(/\{[\s\S]*?"players"[\s\S]*?\}(?=\s*$|\s*```)/)||finalText.match(/\{[\s\S]*?"players"[\s\S]*\}/);
     if(jm){
       try{
         const parsed=JSON.parse(jm[0]);
         if(parsed.players?.length){
-          // Apply live positional probs on top of AI base probs if tournament in progress
-          const round=state.currentRound||0;
           const players=parsed.players.map(p=>{
             if(round>0){
               const espn=state.leaderboard.find(c=>
@@ -2022,16 +2065,18 @@ Exactly 15 players. prob 0-99. R4 leader = 80-90% prob.`;
           sSet("ranker",players);
           state.aiNote=parsed.note||"";
           sSet("note",state.aiNote);
-          // Tag the ranker with which event it was generated for
-          const currName=SCHEDULE.find(s=>s.curr)?.name||state.lbEvent||"";
+          // Store confidence score
+          state.confidence=parsed.confidence||baseConfidence;
+          sSet("confidence",state.confidence);
+          const currName=currSched?.name||state.lbEvent||"";
           state.rankerEvent=currName;
           sSet("rankerEvent",currName);
           if(parsed.conditions){state.conditions=parsed.conditions;sSet("conditions",state.conditions);}
-          if(parsed.xInsights){state.xInsights=parsed.xInsights;sSet("xInsights",state.xInsights);}
+          if(parsed.expertInsights){state.xInsights=parsed.expertInsights;sSet("xInsights",state.xInsights);}
           const now=new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"})+" · "+new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"});
           state.lastRefresh=now;sSet("lr",now);
         }
-      }catch(e){ console.error("JSON parse error",e,jm[0]); state.aiNote="Parse error — try again."; }
+      }catch(e){ console.error("JSON parse error",e); state.aiNote="Parse error — try again."; }
     } else {
       state.aiNote="No rankings returned — try again.";
     }
