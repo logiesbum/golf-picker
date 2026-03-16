@@ -408,7 +408,7 @@ let state = {
   view:"overview", ranker:[], aiNote:"", lastRefresh:"",
   apiKey:"", email:"", sortK:"sg", sortD:"desc", tourF:"all", search:"", selPlayer:null,
   leaderboard:[], lbEvent:"", lbStatus:"", lbLoaded:false, field:[], conditions:"", xInsights:"", currentRound:0,
-  pastResults:[], lastEvent:"", rankerEvent:"", confidence:0,
+  pastResults:[], lastEvent:"", rankerEvent:"", confidence:20,
   preTourneyRankings:{}, autoLoggedEvents:[],
   emailLog:[], reportRecipients:[],
 };
@@ -652,20 +652,42 @@ async function loadLeaderboard(){
       sSet("ranker",state.ranker);
     }
 
-    // Filter to field
-    if(state.field.length>5){
+    // Only filter ranker against ESPN field when ESPN is showing the SAME
+    // tournament as our current scheduled event. If ESPN is still showing
+    // last week's results, do NOT touch the ranker.
+    const currSched=SCHEDULE.find(s=>s.curr);
+    const espnMatchesCurr=currSched&&data.eventName&&
+      (data.eventName.toLowerCase().includes(currSched.name.toLowerCase().split(" ")[0]) ||
+       currSched.name.toLowerCase().includes(data.eventName.toLowerCase().split(" ")[0]));
+
+    if(espnMatchesCurr && state.field.length>5){
       const inField=r=>state.field.some(f=>
         f===r.name.toLowerCase().trim()||
         f.includes(r.name.split(" ").pop().toLowerCase())
       );
       state.ranker=state.ranker.filter(inField);
-      if(state.ranker.length<5) state.ranker=DEFAULT_RANKER.filter(inField);
+      // Only fall back to DEFAULT_RANKER if we have NO generated rankings at all
+      if(state.ranker.length<5 && !state.rankerEvent){
+        state.ranker=DEFAULT_RANKER.filter(inField);
+      }
     }
 
-    document.getElementById("tourn-name").textContent=data.eventName;
-    document.getElementById("tourn-status").innerHTML=data.inProgress
-      ?`<span class="live-dot"></span><span class="tourn-live">LIVE · ${h(data.status)}</span>`
-      :`<span style="color:#6b8f76">${h(data.status)}</span>`;
+    // Show the scheduled current event in sidebar, not ESPN's event
+    // (ESPN may still show last week's tournament for days after it finishes)
+    const schedCurr=SCHEDULE.find(s=>s.curr);
+    const espnIsCurrentEvent=schedCurr&&data.eventName&&
+      (data.eventName.toLowerCase().includes(schedCurr.name.toLowerCase().split(" ")[0])||
+       schedCurr.name.toLowerCase().includes(data.eventName.toLowerCase().split(" ")[0]));
+
+    document.getElementById("tourn-name").textContent=schedCurr?.name||data.eventName;
+    if(espnIsCurrentEvent){
+      document.getElementById("tourn-status").innerHTML=data.inProgress
+        ?`<span class="live-dot"></span><span class="tourn-live">LIVE · ${h(data.status)}</span>`
+        :`<span style="color:#6b8f76">${h(data.status)}</span>`;
+    } else {
+      document.getElementById("tourn-status").innerHTML=
+        `<span style="color:#6b8f76">${schedCurr?.course||""} · ${schedCurr?.dates||""}</span>`;
+    }
     if(data.eventName){ state.lastEvent=data.eventName; sSet("lastEvent",data.eventName); }
     updateCaddiePick();
 
@@ -677,8 +699,9 @@ async function loadLeaderboard(){
 
     checkPreTournamentEmail();
   } else {
-    document.getElementById("tourn-name").textContent="Valspar Championship";
-    document.getElementById("tourn-status").innerHTML=`<span style="color:#6b8f76">Innisbrook (Copperhead)</span>`;
+    const sched=SCHEDULE.find(s=>s.curr);
+    document.getElementById("tourn-name").textContent=sched?.name||"Valspar Championship";
+    document.getElementById("tourn-status").innerHTML=`<span style="color:#6b8f76">${sched?.course||"Innisbrook (Copperhead)"} · ${sched?.dates||""}</span>`;
   }
 }
 
@@ -818,7 +841,7 @@ function renderSidebar(){
   document.getElementById("last-refresh").textContent=state.lastRefresh||"";
   // Confidence bar in sidebar
   const confEl=document.getElementById("sb-confidence");
-  if(confEl&&state.confidence>0) confEl.innerHTML=confidenceMeterHTML(state.confidence,true);
+  if(confEl) confEl.innerHTML=confidenceMeterHTML(Math.max(20,state.confidence||20),true);
   const aiEl=document.getElementById("ai-note");
   if(state.aiNote){aiEl.style.display="block";aiEl.textContent="⚡ "+state.aiNote;}
   else aiEl.style.display="none";
@@ -1950,19 +1973,24 @@ document.getElementById("btn-refresh").onclick=async function(){
 
   try{
     const liveBlock=live?live.summary:"Pre-tournament.";
-    const fieldList=state.leaderboard.length>0
-      ?`\nCONFIRMED FIELD — ONLY rank players from this list:\n${state.leaderboard.map(c=>c.name).join(", ")}\n`
-      :"";
-    const eventName=state.lbEvent||(live?.eventName)||"current PGA Tour event";
     const currSched=SCHEDULE.find(s=>s.curr);
-    const courseName=currSched?.course||"TPC Sawgrass";
+    // Always use the SCHEDULED event — ESPN may still show last week's results
+    const eventName=currSched?.name||state.lbEvent||(live?.eventName)||"current PGA Tour event";
+    const courseName=currSched?.course||"Innisbrook (Copperhead)";
+    // Only use ESPN field if it's actually showing our current event
+    const espnMatchesCurr=currSched&&state.lbEvent&&
+      (state.lbEvent.toLowerCase().includes(currSched.name.toLowerCase().split(" ")[0])||
+       currSched.name.toLowerCase().includes(state.lbEvent.toLowerCase().split(" ")[0]));
+    const fieldList=espnMatchesCurr&&state.leaderboard.length>0
+      ?`\nCONFIRMED FIELD — ONLY rank players from this list:\n${state.leaderboard.map(c=>c.name).join(", ")}\n`
+      :`\n(ESPN field not yet available — rank the strongest expected contenders for ${eventName} at ${courseName} based on SG stats, course fit, and course history)\n`;
     const round=state.currentRound||0;
     const isPreTourney=round===0;
     const yr=new Date().getFullYear();
 
-    // Confidence score — based on how much data we have
-    // Starts low (SG-only), rises as conditions + expert data + live scores come in
-    const baseConfidence=isPreTourney?45:round===1?55:round===2?65:round===3?80:90;
+    // Confidence score — minimum 20%, builds with each data source found
+    // SG stats only = 20-35, + conditions = +15, + expert picks = +15, + live scores = +20
+    const baseConfidence=isPreTourney?35:round===1?55:round===2?65:round===3?80:90;
 
     // Build past performance context
     const perfContext=state.pastResults.length>0?`
@@ -1983,7 +2011,7 @@ MANDATORY RULES:
 - Withdrawn: prob=0, note="❌ WD"
 - Missed cut: prob=0 or exclude
 - Always produce exactly 15 ranked players
-- Include a "confidence" integer 0-100 in your JSON output reflecting data quality this week
+- Include a "confidence" integer 20-100 in your JSON output. Start at 20 (SG stats only). Add ~15 for each useful data source found: course conditions article = +15, expert analysis = +15, injury/form news = +10. Never go below 20.
 
 WEIGHTING (pre-tournament):
 40% SG:Approach + GIR% (primary predictors)
@@ -2078,7 +2106,7 @@ IMPORTANT: Output the JSON immediately after your research. Do not wait for perf
           state.aiNote=parsed.note||"";
           sSet("note",state.aiNote);
           // Store confidence score
-          state.confidence=parsed.confidence||baseConfidence;
+          state.confidence=Math.max(20,parsed.confidence||baseConfidence);
           sSet("confidence",state.confidence);
           const currName=currSched?.name||state.lbEvent||"";
           state.rankerEvent=currName;
@@ -2112,7 +2140,7 @@ function buildEmailBody(isAuto, daysBefore){
   const eventName=state.lbEvent||currSched?.name||"Upcoming Tournament";
   const course=currSched?.course||"";
   const dates=currSched?.dates||"";
-  const conf=state.confidence||0;
+  const conf=Math.max(20,state.confidence||20);
   const now=new Date();
 
   let subjectPrefix="⛳ Caddie Report";
@@ -2146,7 +2174,7 @@ ${"─".repeat(50)}
 ${rankTable}
 
 ${"─".repeat(50)}
-${state.aiNote?`📝 ${state.aiNote}\n\n`:""}${conf<70?`⚠️  Confidence is ${confLabel} — predictions will sharpen closer to tee time. Refresh the Caddie dashboard for the most current rankings.\n\n`:""}📊 View live dashboard: https://logiesbum.github.io/golf-picker/
+${state.aiNote?`📝 ${state.aiNote}\n\n`:""}${conf<70?`⚠️  Confidence is ${confLabel} — predictions will sharpen closer to tee time. Refresh for the most current rankings.\n\n`:""}
 — Caddie Golf Analytics`;
 
   return {subject, body};
