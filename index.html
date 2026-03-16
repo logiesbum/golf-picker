@@ -222,8 +222,10 @@ tr:hover td{background:rgba(45,106,79,.12)}
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button class="btn-cancel" id="settings-cancel">Cancel</button>
+      <button class="btn-save" id="settings-test" style="background:transparent;border:1px solid #2d6a4f;color:#86efac">Test Key</button>
       <button class="btn-save" id="settings-save">Save</button>
     </div>
+    <div id="test-result" style="margin-top:12px;font-size:12px;display:none;padding:9px 12px;border-radius:7px;font-family:'DM Mono',monospace;line-height:1.5"></div>
   </div>
 </div>
 
@@ -666,10 +668,8 @@ async function loadLeaderboard(){
         f.includes(r.name.split(" ").pop().toLowerCase())
       );
       state.ranker=state.ranker.filter(inField);
-      // Only fall back to DEFAULT_RANKER if we have NO generated rankings at all
-      if(state.ranker.length<5 && !state.rankerEvent){
-        state.ranker=DEFAULT_RANKER.filter(inField);
-      }
+      // Never fall back to DEFAULT_RANKER — if ranker is empty after filtering,
+      // it means we need a fresh Refresh for this event
     }
 
     // Show the scheduled current event in sidebar, not ESPN's event
@@ -843,8 +843,12 @@ function renderSidebar(){
   const confEl=document.getElementById("sb-confidence");
   if(confEl) confEl.innerHTML=confidenceMeterHTML(Math.max(20,state.confidence||20),true);
   const aiEl=document.getElementById("ai-note");
-  if(state.aiNote){aiEl.style.display="block";aiEl.textContent="⚡ "+state.aiNote;}
-  else aiEl.style.display="none";
+  if(state.aiNote){
+    aiEl.style.display="block";
+    const isError=state.aiNote.startsWith("API ")||state.aiNote.includes("Error")||state.aiNote.includes("error");
+    aiEl.style.color=isError?"#f87171":"#f5d97a";
+    aiEl.textContent=(isError?"❌ ":"⚡ ")+state.aiNote;
+  }
 }
 
 const viewTitles={overview:"Overview",ranker:"Ranker",players:"Players",leaderboard:"Live Leaderboard",history:"Past Performance",methodology:"Methodology",reports:"Reports",schedule:"Schedule"};
@@ -1376,8 +1380,19 @@ function renderPlayers(container){
       };
     });
   } else {
-    // ESPN not loaded yet — show our full PLAYERS db as placeholder
-    fieldPlayers = PLAYERS.map(p=>({...p, espnName:p.name, hasStats:true, isWD:false, isCut:false, pos:"—", score:"—", thru:"—", posNum:p.owgr}));
+    // ESPN doesn't have the field yet — don't show fake players
+    // Show a clear waiting state instead
+    const currSched=SCHEDULE.find(s=>s.curr);
+    container.innerHTML=`<div style="text-align:center;padding:60px 20px;color:#6b8f76">
+      <div style="font-size:36px;margin-bottom:14px">📋</div>
+      <div style="font-size:16px;font-weight:700;color:#e8f0eb;margin-bottom:8px">Field Not Yet Confirmed</div>
+      <div style="font-size:13px;color:#6b8f76;max-width:420px;margin:0 auto 18px;line-height:1.6">
+        ESPN hasn't published the ${currSched?.name||"tournament"} field yet. The field auto-updates every 30 minutes — check back closer to the tournament start date.
+      </div>
+      <div style="font-size:12px;color:#6b8f76;margin-bottom:18px">${currSched?.name||""} · ${currSched?.course||""} · ${currSched?.dates||""}</div>
+      <button onclick="state.lbLoaded=false;loadLeaderboard().then(()=>render())" style="padding:10px 22px;background:linear-gradient(135deg,#2d6a4f,#1a3c2e);border:none;border-radius:8px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif">🔄 Check Now</button>
+    </div>`;
+    return;
   }
 
   // Apply search filter
@@ -1887,6 +1902,61 @@ function openSettings(){
   document.getElementById("settings-modal").style.display="flex";
 }
 function closeSettings(){document.getElementById("settings-modal").style.display="none";}
+document.getElementById("settings-test").onclick=async function(){
+  const key=document.getElementById("api-key-inp").value.trim();
+  const resultEl=document.getElementById("test-result");
+  if(!key){
+    resultEl.style.display="block";
+    resultEl.style.background="rgba(239,68,68,.1)";
+    resultEl.style.border="1px solid rgba(239,68,68,.3)";
+    resultEl.style.color="#fca5a5";
+    resultEl.textContent="❌ Enter an API key first.";
+    return;
+  }
+  this.textContent="Testing…";
+  this.disabled=true;
+  resultEl.style.display="block";
+  resultEl.style.background="rgba(255,255,255,.04)";
+  resultEl.style.border="1px solid #1a2e20";
+  resultEl.style.color="#6b8f76";
+  resultEl.textContent="Calling api.anthropic.com…";
+  try{
+    const res=await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST",
+      headers:{
+        "Content-Type":"application/json",
+        "x-api-key":key,
+        "anthropic-version":"2023-06-01",
+        "anthropic-dangerous-direct-browser-access":"true",
+      },
+      body:JSON.stringify({
+        model:"claude-haiku-4-5-20251001",
+        max_tokens:20,
+        messages:[{role:"user",content:"Reply with only the word: WORKING"}],
+      }),
+    });
+    const data=await res.json();
+    if(res.ok&&data.content?.[0]?.text){
+      resultEl.style.background="rgba(82,183,136,.1)";
+      resultEl.style.border="1px solid rgba(82,183,136,.3)";
+      resultEl.style.color="#86efac";
+      resultEl.textContent="✅ Key works! Response: "+data.content[0].text.trim();
+    } else {
+      const err=data?.error?.message||JSON.stringify(data).slice(0,200);
+      resultEl.style.background="rgba(239,68,68,.1)";
+      resultEl.style.border="1px solid rgba(239,68,68,.3)";
+      resultEl.style.color="#fca5a5";
+      resultEl.textContent="❌ HTTP "+res.status+": "+err;
+    }
+  }catch(e){
+    resultEl.style.background="rgba(239,68,68,.1)";
+    resultEl.style.border="1px solid rgba(239,68,68,.3)";
+    resultEl.style.color="#fca5a5";
+    resultEl.textContent="❌ Network error: "+e.message;
+  }
+  this.textContent="Test Key";
+  this.disabled=false;
+};
 document.getElementById("btn-settings").onclick=openSettings;
 document.getElementById("settings-close").onclick=closeSettings;
 document.getElementById("settings-cancel").onclick=closeSettings;
@@ -1900,14 +1970,15 @@ document.getElementById("settings-save").onclick=function(){
 };
 
 // ── CLAUDE API CALL ────────────────────────────────────────────────────────
-async function callClaude(messages, tools, system){
+async function callClaude(messages, tools, system, model){
   const body={
-    model:"claude-sonnet-4-6",
-    max_tokens:4000,
+    model: model||"claude-haiku-4-5-20251001",
+    max_tokens: model&&model.includes("sonnet") ? 4000 : 2000,
     messages,
   };
   if(tools&&tools.length) body.tools=tools;
   if(system) body.system=system;
+
   const res=await fetch("https://api.anthropic.com/v1/messages",{
     method:"POST",
     headers:{
@@ -1918,7 +1989,16 @@ async function callClaude(messages, tools, system){
     },
     body:JSON.stringify(body),
   });
-  return await res.json();
+
+  const data=await res.json();
+  if(!res.ok){
+    const errMsg=data?.error?.message||JSON.stringify(data);
+    console.error(`API ${res.status}:`,errMsg);
+    state.aiNote=`API ${res.status}: ${errMsg.slice(0,150)}`;
+    render();
+    return {error:data?.error||{message:errMsg},content:[]};
+  }
+  return data;
 }
 
 // ── FETCH LIVE ESPN SUMMARY ────────────────────────────────────────────────
@@ -2012,7 +2092,7 @@ Output ONLY valid JSON, no markdown, no explanation:
 Tiers: Elite|Contender|Hot Form|Sleeper|Value|Specialist
 Exactly 15 players. prob 0-99. No LIV-only players.`;
 
-    const baseResp=await callClaude([{role:"user",content:basePrompt}],[],null);
+    const baseResp=await callClaude([{role:"user",content:basePrompt}],[],null,"claude-haiku-4-5-20251001");
     let baseText=(baseResp.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("");
 
     // Save base rankings immediately so user always gets something
@@ -2078,7 +2158,7 @@ Exactly 15 players. Same event: ${eventName}. No LIV-only players.`;
 
     while(turns<6){
       turns++;
-      const resp=await callClaude(messages,[webSearch],null);
+      const resp=await callClaude(messages,[webSearch],null,"claude-sonnet-4-6");
       if(!resp||resp.error||!resp.content) break;
 
       resp.content.filter(b=>b.type==="text").forEach(b=>{enrichText=b.text;});
@@ -2178,7 +2258,7 @@ async function sendEmailReport(isAuto, daysBefore, recipients){
           "anthropic-dangerous-direct-browser-access":"true",
         },
         body:JSON.stringify({
-          model:"claude-sonnet-4-6",
+          model:"claude-haiku-4-5-20251001",
           max_tokens:500,
           mcp_servers:[{type:"url",url:"https://gmail.mcp.claude.com/mcp",name:"gmail"}],
           messages:[{role:"user",content:`Send an email. Do not modify the content.\n\nTO: ${to}\nSUBJECT: ${subject}\n\nBODY:\n${body}`}],
@@ -2453,6 +2533,16 @@ function renderReports(container){
 loadState();
 render();
 loadLeaderboard();
+
+// Auto-refresh field every 30 minutes — keeps field accurate throughout the week
+setInterval(()=>{
+  loadLeaderboard().then(()=>{
+    // If on leaderboard or players tab, re-render with fresh field
+    if(state.view==="leaderboard"||state.view==="players"){
+      render();
+    }
+  });
+}, 30 * 60 * 1000);
 </script>
 </body>
 </html>
