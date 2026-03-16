@@ -1956,179 +1956,158 @@ async function fetchLiveTournamentData(){
 }
 
 // ── AGENTIC REFRESH ────────────────────────────────────────────────────────
-// Multi-turn loop: searches web for course conditions + X expert picks,
-// then generates final rankings using all context.
 document.getElementById("btn-refresh").onclick=async function(){
   if(!state.apiKey){openSettings();return;}
   const btn=this;
   btn.disabled=true;
 
-  const steps=["🌐 Live scores…","🧠 Crunching stats…","🔍 Scanning web…","⛳ Finalising…"];
-  let si=0;
-  const setStep=s=>{si=Math.min(s,steps.length-1);btn.innerHTML=`<span class="spinning">🔄</span> ${steps[si]}`;};
-  setStep(0);
+  const setStep=t=>{btn.innerHTML=`<span class="spinning">🔄</span> ${t}`;};
+  setStep("🧠 Building rankings…");
 
   const live=await fetchLiveTournamentData();
-  setStep(1);
 
   try{
-    const liveBlock=live?live.summary:"Pre-tournament.";
     const currSched=SCHEDULE.find(s=>s.curr);
-    // Always use the SCHEDULED event — ESPN may still show last week's results
-    const eventName=currSched?.name||state.lbEvent||(live?.eventName)||"current PGA Tour event";
+    const eventName=currSched?.name||"current PGA Tour event";
     const courseName=currSched?.course||"Innisbrook (Copperhead)";
-    // Only use ESPN field if it's actually showing our current event
-    const espnMatchesCurr=currSched&&state.lbEvent&&
-      (state.lbEvent.toLowerCase().includes(currSched.name.toLowerCase().split(" ")[0])||
-       currSched.name.toLowerCase().includes(state.lbEvent.toLowerCase().split(" ")[0]));
-    const fieldList=espnMatchesCurr&&state.leaderboard.length>0
-      ?`\nCONFIRMED FIELD — ONLY rank players from this list:\n${state.leaderboard.map(c=>c.name).join(", ")}\n`
-      :`\n(ESPN field not yet available — rank the strongest expected contenders for ${eventName} at ${courseName} based on SG stats, course fit, and course history)\n`;
     const round=state.currentRound||0;
     const isPreTourney=round===0;
     const yr=new Date().getFullYear();
+    const liveBlock=live?live.summary:`Pre-tournament — ${eventName} at ${courseName}.`;
 
-    // Confidence score — minimum 20%, builds with each data source found
-    // SG stats only = 20-35, + conditions = +15, + expert picks = +15, + live scores = +20
-    const baseConfidence=isPreTourney?35:round===1?55:round===2?65:round===3?80:90;
+    const espnMatchesCurr=currSched&&state.lbEvent&&
+      (state.lbEvent.toLowerCase().includes(currSched.name.toLowerCase().split(" ")[0])||
+       currSched.name.toLowerCase().includes(state.lbEvent.toLowerCase().split(" ")[0]));
+    const fieldNote=espnMatchesCurr&&state.leaderboard.length>0
+      ?`Confirmed field (${state.leaderboard.length} players): ${state.leaderboard.slice(0,40).map(c=>c.name).join(", ")}...`
+      :`Rank the top contenders for ${eventName} based on SG stats and Innisbrook (Copperhead) course fit. Do not include LIV-only players.`;
 
-    // Build past performance context
-    const perfContext=state.pastResults.length>0?`
-PAST CADDIE PERFORMANCE — learn from these patterns:
-${state.pastResults.map(r=>{
-  const hits=(r.caddieRankings||[]).filter(p=>(r.actualTop10||[]).includes(p.name));
-  const surprises=(r.surprises||[]).map(s=>s.name);
-  return `• ${r.tournament} (${r.course||""}): Winner ${r.winner}. Our hits: ${hits.map(p=>p.name).join(", ")||"none"}. Surprises we missed: ${surprises.join(", ")||"none"}.`;
-}).join("\n")}
-Apply these lessons: boost player types that have surprised us, temper profiles we over-ranked.`:"";
+    const perfContext=state.pastResults.length>0
+      ?`Past results: ${state.pastResults.slice(0,3).map(r=>{
+          const hits=(r.caddieRankings||[]).filter(p=>(r.actualTop10||[]).includes(p.name));
+          return `${r.tournament}: winner ${r.winner}, our hits: ${hits.map(p=>p.name).join(", ")||"none"}`;
+        }).join(". ")}.`
+      :"";
 
-    const systemPrompt=`You are a PGA Tour analytics AI powering a golf pick'em bracket tool.
+    // ── STEP 1: Get rankings immediately (no web search, guaranteed output) ──
+    setStep("🧠 Ranking the field…");
+    const basePrompt=`You are a PGA Tour analytics AI. Generate pre-tournament top-15 rankings for ${eventName} at ${courseName}.
 
-Your PRIMARY job is to generate rankings from strokes-gained stats and course fit — this happens regardless of whether web search returns anything useful. Web search supplements your analysis, it does not gate it.
-
-MANDATORY RULES:
-- ONLY rank players in the confirmed field. Never include LIV-only players not in field.
-- Withdrawn: prob=0, note="❌ WD"
-- Missed cut: prob=0 or exclude
-- Always produce exactly 15 ranked players
-- Include a "confidence" integer 20-100 in your JSON output. Start at 20 (SG stats only). Add ~15 for each useful data source found: course conditions article = +15, expert analysis = +15, injury/form news = +10. Never go below 20.
-
-WEIGHTING (pre-tournament):
-40% SG:Approach + GIR% (primary predictors)
-25% Course fit score + course history
-20% Current form / recent finishes
-15% Conditions + expert analysis from web
-
-WEIGHTING (in-tournament):
-40% Current leaderboard position
-30% Score relative to field
-20% SG:Approach for remaining holes
-10% Course history
-${perfContext}
-CONDITION ADJUSTMENTS:
-Thick rough → reward high GIR%, punish bombers with low accuracy
-Fast greens → reward elite putters
-Wind → reward low ball-flight accurate players
-Soft conditions → distance advantage matters more`;
-
-    const userMessage=`Generate rankings for ${eventName} at ${courseName}.
-
-=== LIVE DATA ===
 ${liveBlock}
-${fieldList}
-RESEARCH TASKS — use web_search for each (rankings must be produced even if searches fail):
-1. "${eventName} ${yr} course conditions rough greens wind stimpmeter"
-2. "${eventName} ${yr} golf picks expert analysis sleepers"
-3. "${eventName} ${yr} player injuries withdrawals form"
 
-After researching, output ONLY valid JSON (no markdown fences, no preamble):
-{"note":"one sentence key insight","conditions":"2-3 sentences: rough status, green speed, wind, firmness","expertInsights":"1-2 sentences from expert analysis found (no names of specific accounts)","confidence":${baseConfidence},"players":[{"rank":1,"name":"Full Name","tier":"Elite","prob":42,"odds":"+480","note":"max 12 words why they rank here"}]}
+${fieldNote}
 
-Tiers: Elite|Contender|Hot Form|Sleeper|Value|LIV Watch|Specialist
-prob is integer 0-99. ${round>=3?"R3/R4 leader should have prob 75-90%.":"Be realistic across the field."}
-IMPORTANT: Output the JSON immediately after your research. Do not wait for perfect information.`;
+${perfContext}
 
+COURSE: ${courseName}. Key stats for this course:
+- SG:Approach is the #1 predictor (accuracy to greens)
+- GIR% target 70%+ for contenders
+- Copperhead rough is thick — penalise low-accuracy drivers
+- SG:Putting matters on fast, undulating greens
+- Course history at Innisbrook is a strong signal
+
+Output ONLY valid JSON, no markdown, no explanation:
+{"note":"one sentence insight","conditions":"conditions unknown — will update with web data","expertInsights":"","confidence":35,"players":[{"rank":1,"name":"Full Name","tier":"Elite","prob":38,"odds":"+800","note":"max 12 words"}]}
+
+Tiers: Elite|Contender|Hot Form|Sleeper|Value|Specialist
+Exactly 15 players. prob 0-99. No LIV-only players.`;
+
+    const baseResp=await callClaude([{role:"user",content:basePrompt}],[],null);
+    let baseText=(baseResp.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("");
+
+    // Save base rankings immediately so user always gets something
+    const saveRankings=(text,conf)=>{
+      const jm=text.match(/\{[\s\S]*?"players"[\s\S]*\}/);
+      if(!jm) return false;
+      try{
+        const parsed=JSON.parse(jm[0]);
+        if(!parsed.players?.length) return false;
+        parsed.players.sort((a,b)=>(b.prob||0)-(a.prob||0));
+        parsed.players.forEach((p,i)=>p.rank=i+1);
+        state.ranker=parsed.players;
+        sSet("ranker",parsed.players);
+        state.aiNote=parsed.note||"";
+        sSet("note",state.aiNote);
+        state.confidence=Math.max(20,conf||parsed.confidence||35);
+        sSet("confidence",state.confidence);
+        if(parsed.conditions&&!parsed.conditions.includes("unknown")){
+          state.conditions=parsed.conditions;sSet("conditions",state.conditions);
+        }
+        if(parsed.expertInsights){state.xInsights=parsed.expertInsights;sSet("xInsights",state.xInsights);}
+        const currName=currSched?.name||"";
+        state.rankerEvent=currName;sSet("rankerEvent",currName);
+        const now=new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"})+" · "+new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"});
+        state.lastRefresh=now;sSet("lr",now);
+        return true;
+      }catch(e){console.error("Parse error:",e,jm[0]);return false;}
+    };
+
+    const baseOk=saveRankings(baseText,35);
+    if(baseOk){
+      // Render immediately so user sees rankings right away
+      await loadLeaderboard();
+      render();
+    } else {
+      state.aiNote="Rankings failed — check API key in Settings.";
+      btn.disabled=false;btn.innerHTML="🔄 Refresh Data";
+      render();return;
+    }
+
+    // ── STEP 2: Enrich with web search (conditions, expert picks, weather) ──
+    setStep("🔍 Searching conditions…");
     const webSearch={type:"web_search_20250305",name:"web_search"};
-    let messages=[{role:"user",content:userMessage}];
-    let finalText="";
+    const enrichPrompt=`You are a PGA Tour analytics AI. Search for current information about ${eventName} ${yr}, then output updated rankings.
+
+Search for:
+1. "${eventName} ${yr} course conditions rough greens wind weather"
+2. "${eventName} ${yr} golf picks predictions sleepers"
+3. "${eventName} ${yr} withdrawals injuries player news"
+
+After searching, output ONLY valid JSON — no markdown, no preamble, no explanation:
+{"note":"one sentence insight mentioning a specific finding","conditions":"2-3 sentences on rough thickness, green speed, wind forecast, course firmness","expertInsights":"1-2 sentences summarising expert analysis you found (no specific account names)","confidence":65,"players":[{"rank":1,"name":"Full Name","tier":"Elite","prob":38,"odds":"+800","note":"max 12 words"}]}
+
+Base your rankings on this existing analysis but improve with what you find:
+Current #1: ${state.ranker[0]?.name||"TBD"} (${state.ranker[0]?.prob||0}% T10)
+
+Tiers: Elite|Contender|Hot Form|Sleeper|Value|Specialist
+Exactly 15 players. Same event: ${eventName}. No LIV-only players.`;
+
+    let enrichText="";
+    let messages=[{role:"user",content:enrichPrompt}];
     let turns=0;
 
-    while(turns<8){
+    while(turns<6){
       turns++;
-      const resp=await callClaude(messages,[webSearch],systemPrompt);
+      const resp=await callClaude(messages,[webSearch],null);
+      if(!resp||resp.error||!resp.content) break;
 
-      if(resp.error){
-        console.error("Claude error:",resp.error);
-        state.aiNote=`API error: ${resp.error.message||"check console"}`;
-        break;
-      }
-      if(!resp.content) break;
-
-      resp.content.filter(b=>b.type==="text").forEach(b=>{ finalText=b.text; });
+      resp.content.filter(b=>b.type==="text").forEach(b=>{enrichText=b.text;});
 
       if(resp.stop_reason==="end_turn"||resp.stop_reason==="stop_sequence") break;
 
       if(resp.stop_reason==="tool_use"){
-        if(turns===2) setStep(2);
-        else if(turns===3) setStep(3);
         messages.push({role:"assistant",content:resp.content});
-        messages.push({role:"user",content:[{type:"text",text:"Continue. Produce the final JSON rankings now."}]});
-        await new Promise(r=>setTimeout(r,300));
+        messages.push({role:"user",content:[{type:"text",text:"Good. Now produce the final JSON rankings."}]});
+        await new Promise(r=>setTimeout(r,400));
         continue;
       }
       break;
     }
 
-    setStep(3);
-
-    const jm=finalText.match(/\{[\s\S]*?"players"[\s\S]*?\}(?=\s*$|\s*```)/)||finalText.match(/\{[\s\S]*?"players"[\s\S]*\}/);
-    if(jm){
-      try{
-        const parsed=JSON.parse(jm[0]);
-        if(parsed.players?.length){
-          const players=parsed.players.map(p=>{
-            if(round>0){
-              const espn=state.leaderboard.find(c=>
-                c.name.toLowerCase()===p.name.toLowerCase()||
-                c.name.toLowerCase().includes(p.name.split(" ").pop().toLowerCase())
-              );
-              if(espn&&!espn.isWD&&!espn.isCut){
-                const lp=calcLiveT10Prob(espn,round);
-                if(lp!==null) return {...p,prob:lp};
-              }
-            }
-            return p;
-          });
-          players.sort((a,b)=>(b.prob||0)-(a.prob||0));
-          players.forEach((p,i)=>p.rank=i+1);
-          state.ranker=players;
-          sSet("ranker",players);
-          state.aiNote=parsed.note||"";
-          sSet("note",state.aiNote);
-          // Store confidence score
-          state.confidence=Math.max(20,parsed.confidence||baseConfidence);
-          sSet("confidence",state.confidence);
-          const currName=currSched?.name||state.lbEvent||"";
-          state.rankerEvent=currName;
-          sSet("rankerEvent",currName);
-          if(parsed.conditions){state.conditions=parsed.conditions;sSet("conditions",state.conditions);}
-          if(parsed.expertInsights){state.xInsights=parsed.expertInsights;sSet("xInsights",state.xInsights);}
-          const now=new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"})+" · "+new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"});
-          state.lastRefresh=now;sSet("lr",now);
-        }
-      }catch(e){ console.error("JSON parse error",e); state.aiNote="Parse error — try again."; }
-    } else {
-      state.aiNote="No rankings returned — try again.";
+    if(enrichText){
+      const enrichOk=saveRankings(enrichText,65);
+      if(enrichOk){
+        await loadLeaderboard();
+        render();
+      }
     }
 
   }catch(e){
-    console.error(e);
-    state.aiNote="Error — check API key in Settings.";
+    console.error("Refresh error:",e);
+    state.aiNote="Error: "+e.message;
   }
 
-  await loadLeaderboard();
-  btn.disabled=false;
-  btn.innerHTML="🔄 Refresh Data";
+  btn.disabled=false;btn.innerHTML="🔄 Refresh Data";
   render();
 };
 
