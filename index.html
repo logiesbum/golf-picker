@@ -1902,7 +1902,7 @@ document.getElementById("settings-save").onclick=function(){
 // ── CLAUDE API CALL ────────────────────────────────────────────────────────
 async function callClaude(messages, tools, system){
   const body={
-    model:"claude-sonnet-4-20250514",
+    model:"claude-sonnet-4-6",
     max_tokens:4000,
     messages,
   };
@@ -2178,7 +2178,7 @@ async function sendEmailReport(isAuto, daysBefore, recipients){
           "anthropic-dangerous-direct-browser-access":"true",
         },
         body:JSON.stringify({
-          model:"claude-sonnet-4-20250514",
+          model:"claude-sonnet-4-6",
           max_tokens:500,
           mcp_servers:[{type:"url",url:"https://gmail.mcp.claude.com/mcp",name:"gmail"}],
           messages:[{role:"user",content:`Send an email. Do not modify the content.\n\nTO: ${to}\nSUBJECT: ${subject}\n\nBODY:\n${body}`}],
