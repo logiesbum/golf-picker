@@ -410,6 +410,7 @@ let state = {
   leaderboard:[], lbEvent:"", lbStatus:"", lbLoaded:false, field:[], conditions:"", xInsights:"", currentRound:0,
   pastResults:[], lastEvent:"", rankerEvent:"", confidence:0,
   preTourneyRankings:{}, autoLoggedEvents:[],
+  emailLog:[], reportRecipients:[],
 };
 
 // ── STORAGE ───────────────────────────────────────────────────────────────
@@ -433,6 +434,13 @@ function loadState(){
   const xi=sGet("xInsights"); if(xi) state.xInsights=xi;
   const re=sGet("rankerEvent"); if(re) state.rankerEvent=re;
   const conf=sGet("confidence"); if(conf) state.confidence=conf;
+  const el=sGet("emailLog"); if(el) state.emailLog=el;
+  const rr=sGet("reportRecipients"); if(rr) state.reportRecipients=rr;
+  // Back-fill primary email into recipients list if not already there
+  if(state.email && !state.reportRecipients.includes(state.email)){
+    state.reportRecipients.push(state.email);
+    sSet("reportRecipients",state.reportRecipients);
+  }
   const ptr=sGet("preTourneyRankings"); if(ptr) state.preTourneyRankings=ptr;
   const ale=sGet("autoLoggedEvents"); if(ale) state.autoLoggedEvents=ale;
   const pr=sGet("pastResults"); state.pastResults=pr||[];
@@ -781,6 +789,7 @@ function render(){
   else if(state.view==="leaderboard") renderLeaderboard(m);
   else if(state.view==="history")     renderHistory(m);
   else if(state.view==="methodology") renderMethodology(m);
+  else if(state.view==="reports")     renderReports(m);
   else if(state.view==="schedule")    renderSchedule(m);
   updateCaddiePick();
 }
@@ -793,6 +802,7 @@ function renderSidebar(){
     {id:"leaderboard", icon:"📊",label:"Leaderboard"},
     {id:"history",     icon:"📈",label:"Past Performance"},
     {id:"methodology", icon:"🧠",label:"Methodology"},
+    {id:"reports",     icon:"📧",label:"Reports"},
     {id:"schedule",    icon:"📅",label:"Schedule"},
   ];
   const nav=document.getElementById("nav");
@@ -814,7 +824,7 @@ function renderSidebar(){
   else aiEl.style.display="none";
 }
 
-const viewTitles={overview:"Overview",ranker:"Ranker",players:"Players",leaderboard:"Live Leaderboard",history:"Past Performance",methodology:"Methodology",schedule:"Schedule"};
+const viewTitles={overview:"Overview",ranker:"Ranker",players:"Players",leaderboard:"Live Leaderboard",history:"Past Performance",methodology:"Methodology",reports:"Reports",schedule:"Schedule"};
 function renderTopbar(){
   document.getElementById("page-title").textContent=viewTitles[state.view]||"";
   const fil=document.getElementById("topbar-filters");
@@ -992,6 +1002,8 @@ function confidenceMeterHTML(conf, compact){
     <div style="font-size:11px;color:#6b8f76">${desc}${c>0&&c<85?" — hit Refresh to increase accuracy":""}</div>
   </div>`;
 }
+
+function renderRanker(container){
   const currEvent=SCHEDULE.find(s=>s.curr);
   const currName=currEvent?.name||"this week's tournament";
   const needsRefresh=!state.ranker.length||!state.rankerEvent||(state.rankerEvent&&state.rankerEvent!==currName);
@@ -2093,90 +2105,340 @@ IMPORTANT: Output the JSON immediately after your research. Do not wait for perf
 };
 
 // ── EMAIL REPORT ───────────────────────────────────────────────────────────
-async function sendEmailReport(isAuto){
-  if(!state.apiKey||!state.email) return;
+// ── BUILD EMAIL BODY ────────────────────────────────────────────────────────
+function buildEmailBody(isAuto, daysBefore){
   const top=state.ranker.filter(p=>(p.prob||0)>0).slice(0,10);
-  const eventName=state.lbEvent||"Upcoming Tournament";
-  const subject=isAuto
-    ?`⛳ Caddie Pre-Tournament Report — ${eventName}`
-    :`⛳ Caddie Rankings — ${eventName}`;
+  const currSched=SCHEDULE.find(s=>s.curr);
+  const eventName=state.lbEvent||currSched?.name||"Upcoming Tournament";
+  const course=currSched?.course||"";
+  const dates=currSched?.dates||"";
+  const conf=state.confidence||0;
+  const now=new Date();
 
-  const rankTable=top.map(p=>`${p.rank}. ${p.name} — ${p.prob}% T10 · ${p.odds||"—"} to win\n   ${p.note||""}`).join("\n\n");
-  const body=`${subject}
-
-📍 ${eventName}${SCHEDULE.find(s=>s.curr)?` · ${SCHEDULE.find(s=>s.curr).course}`:""}
-🕒 Updated: ${state.lastRefresh||new Date().toLocaleString()}
-
-${state.conditions?`🌿 COURSE CONDITIONS\n${state.conditions}\n\n`:""}${state.xInsights?`🐦 EXPERT INSIGHTS (Klos/Mayo)\n${state.xInsights}\n\n`:""}⛳ CADDIE TOP-10 PICKS\n${"─".repeat(40)}\n${rankTable}
-
-${state.aiNote?`📝 ${state.aiNote}\n\n`:""}—
-Caddie Golf Analytics · ${new Date().toLocaleDateString()}`;
-
-  try{
-    // Use Gmail MCP via Anthropic API to send the email
-    const res=await fetch("https://api.anthropic.com/v1/messages",{
-      method:"POST",
-      headers:{
-        "Content-Type":"application/json",
-        "x-api-key":state.apiKey,
-        "anthropic-version":"2023-06-01",
-        "anthropic-dangerous-direct-browser-access":"true",
-      },
-      body:JSON.stringify({
-        model:"claude-sonnet-4-20250514",
-        max_tokens:500,
-        mcp_servers:[{type:"url",url:"https://gmail.mcp.claude.com/mcp",name:"gmail"}],
-        messages:[{role:"user",content:`Send an email with this exact subject and body. Do not modify the content.\n\nTO: ${state.email}\nSUBJECT: ${subject}\n\nBODY:\n${body}`}],
-      })
-    });
-    const d=await res.json();
-    const sent=d.content?.some(b=>b.text?.toLowerCase().includes("sent")||b.text?.toLowerCase().includes("email"));
-    return sent!==false;
-  }catch(e){
-    console.error("Email error:",e);
-    return false;
+  let subjectPrefix="⛳ Caddie Report";
+  if(isAuto){
+    if(daysBefore>=3) subjectPrefix=`⛳ Caddie Early Look`;
+    else if(daysBefore===2) subjectPrefix=`⛳ Caddie 2-Day Preview`;
+    else if(daysBefore===1) subjectPrefix=`⛳ Caddie Final Preview`;
+    else subjectPrefix=`⛳ Caddie Tournament Day`;
   }
+  const subject=`${subjectPrefix} — ${eventName}`;
+
+  const rankTable=top.map((p,i)=>`${i+1}. ${p.name.padEnd(22)} ${String(p.prob+"%").padStart(4)} T10  ${p.odds||"—"}  ${p.note||""}`).join("\n");
+
+  const confBar="█".repeat(Math.round(conf/10))+"░".repeat(10-Math.round(conf/10));
+  const confLabel=conf>=80?"Very High":conf>=60?"High":conf>=40?"Moderate":"Building";
+
+  const body=`${subject}
+${"═".repeat(50)}
+📍 ${eventName}
+${course?`📍 ${course}  `:``}${dates?`🗓 ${dates}`:``}
+🕒 Generated: ${now.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})} at ${now.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"})}
+${isAuto&&daysBefore>0?`⏳ ${daysBefore} day${daysBefore>1?"s":""} until first tee time\n`:""}
+🎯 CONFIDENCE: ${confBar} ${conf}% (${confLabel})
+   Rankings improve as course conditions and live data come in.
+
+${"─".repeat(50)}
+${state.conditions?`🌿 COURSE CONDITIONS\n${state.conditions}\n\n`:""}${state.xInsights?`🔍 EXPERT ANALYSIS\n${state.xInsights}\n\n`:""}⛳ CADDIE TOP-10 PREDICTIONS
+${"─".repeat(50)}
+${"#".padEnd(4)}${"Player".padEnd(24)}${"T10%".padStart(5)}  ${"Odds".padStart(7)}  Note
+${"─".repeat(50)}
+${rankTable}
+
+${"─".repeat(50)}
+${state.aiNote?`📝 ${state.aiNote}\n\n`:""}${conf<70?`⚠️  Confidence is ${confLabel} — predictions will sharpen closer to tee time. Refresh the Caddie dashboard for the most current rankings.\n\n`:""}📊 View live dashboard: https://logiesbum.github.io/golf-picker/
+— Caddie Golf Analytics`;
+
+  return {subject, body};
+}
+
+// ── SEND EMAIL REPORT ──────────────────────────────────────────────────────
+async function sendEmailReport(isAuto, daysBefore, recipients){
+  const toList=recipients||state.reportRecipients;
+  if(!state.apiKey||!toList.length) return false;
+
+  const {subject,body}=buildEmailBody(isAuto, daysBefore||0);
+
+  let allOk=true;
+  for(const to of toList){
+    try{
+      const res=await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",
+        headers:{
+          "Content-Type":"application/json",
+          "x-api-key":state.apiKey,
+          "anthropic-version":"2023-06-01",
+          "anthropic-dangerous-direct-browser-access":"true",
+        },
+        body:JSON.stringify({
+          model:"claude-sonnet-4-20250514",
+          max_tokens:500,
+          mcp_servers:[{type:"url",url:"https://gmail.mcp.claude.com/mcp",name:"gmail"}],
+          messages:[{role:"user",content:`Send an email. Do not modify the content.\n\nTO: ${to}\nSUBJECT: ${subject}\n\nBODY:\n${body}`}],
+        })
+      });
+      const d=await res.json();
+      const ok=d.content?.some(b=>b.text?.toLowerCase().includes("sent")||b.text?.toLowerCase().includes("email"));
+      if(ok===false) allOk=false;
+    }catch(e){ allOk=false; }
+  }
+
+  // Log the send
+  const entry={
+    ts:new Date().toLocaleString("en-US",{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}),
+    subject,
+    to:toList.join(", "),
+    type:isAuto?(daysBefore>0?`Auto · ${daysBefore}d before`:"Auto · game day"):"Manual",
+    ok:allOk,
+  };
+  state.emailLog.unshift(entry);
+  if(state.emailLog.length>50) state.emailLog=state.emailLog.slice(0,50);
+  sSet("emailLog",state.emailLog);
+
+  return allOk;
 }
 
 document.getElementById("btn-send-email").onclick=async function(){
-  if(!state.apiKey||!state.email){openSettings();return;}
+  if(!state.apiKey||!state.reportRecipients.length){
+    state.view="reports"; render(); return;
+  }
   const btn=this;
   btn.disabled=true;
   btn.innerHTML='<span class="spinning">📧</span> Sending…';
-  const ok=await sendEmailReport(false);
+  const ok=await sendEmailReport(false,0);
   btn.disabled=false;
-  btn.innerHTML=ok?"✅ Sent!":"❌ Failed — check settings";
+  btn.innerHTML=ok?"✅ Sent!":"❌ Failed";
   setTimeout(()=>{btn.innerHTML="📧 Send Report";},3000);
 };
 
-// ── PRE-TOURNAMENT AUTO EMAIL ──────────────────────────────────────────────
-// Check if it's the day before a tournament and email hasn't been sent yet
+// ── DAILY AUTO EMAIL ───────────────────────────────────────────────────────
+// Fires once per day per day-bucket leading up to the tournament
 function checkPreTournamentEmail(){
-  if(!state.email||!state.apiKey) return;
-  const today=new Date();
-  const tomorrow=new Date(today);
-  tomorrow.setDate(tomorrow.getDate()+1);
-  const tomorrowStr=tomorrow.toLocaleDateString("en-US",{month:"short",day:"numeric"});
+  if(!state.reportRecipients.length||!state.apiKey) return;
+  if(state.ranker.length<5) return;
 
-  const upcoming=SCHEDULE.find(s=>{
-    if(!s.dates) return false;
-    const startDate=s.dates.split("–")[0].trim(); // e.g. "Mar 19"
-    return startDate===tomorrowStr;
+  const today=new Date();
+  const hour=today.getHours();
+  if(hour<7) return; // don't send before 7am
+
+  const currSched=SCHEDULE.find(s=>s.curr);
+  if(!currSched||!currSched.dates) return;
+
+  // Parse tournament start date
+  const monthDay=currSched.dates.split("–")[0].trim(); // "Mar 19"
+  const yr=today.getFullYear();
+  const tournStart=new Date(`${monthDay} ${yr}`);
+  if(isNaN(tournStart.getTime())) return;
+
+  const msPerDay=86400000;
+  const diffDays=Math.round((tournStart-today)/msPerDay);
+
+  // Send on days 4, 3, 2, 1, 0 before tournament (4 days out through game day)
+  if(diffDays<0||diffDays>4) return;
+
+  // One send per day — key by event + day bucket
+  const dayKey=`autoEmail_${currSched.w}_d${diffDays}`;
+  if(sGet(dayKey)) return;
+
+  sSet(dayKey, true);
+  sendEmailReport(true, diffDays).then(ok=>{
+    if(!ok) sSet(dayKey, null); // allow retry if failed
+  });
+}
+
+// ── REPORTS TAB ────────────────────────────────────────────────────────────
+function renderReports(container){
+  const currSched=SCHEDULE.find(s=>s.curr);
+  const today=new Date();
+
+  // Calculate send schedule for current tournament
+  let sendSchedule=[];
+  if(currSched?.dates){
+    const monthDay=currSched.dates.split("–")[0].trim();
+    const tournStart=new Date(`${monthDay} ${today.getFullYear()}`);
+    if(!isNaN(tournStart.getTime())){
+      for(let d=4;d>=0;d--){
+        const sendDate=new Date(tournStart.getTime()-d*86400000);
+        const dayKey=`autoEmail_${currSched.w}_d${d}`;
+        const sent=sGet(dayKey);
+        const label=d===0?"Tournament Day":d===1?"Day Before (Final Preview)":d===2?"2 Days Out":d===3?"3 Days Out":"4 Days Out (Early Look)";
+        const isPast=sendDate<today;
+        sendSchedule.push({
+          d, label, date:sendDate.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"}),
+          sent:!!sent, isPast,
+        });
+      }
+    }
+  }
+
+  let html=``;
+
+  // Recipients panel
+  html+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:18px">
+
+    <div class="panel">
+      <div class="panel-header">📬 Report Recipients
+        <button id="btn-add-recipient" style="padding:4px 11px;background:rgba(45,106,79,.3);border:1px solid #2d6a4f;border-radius:6px;color:#86efac;font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif">+ Add</button>
+      </div>
+      <div style="padding:14px 16px">
+        ${state.reportRecipients.length===0?`<div style="font-size:13px;color:#6b8f76;padding:8px 0">No recipients yet. Add an email address to start receiving reports.</div>`:""}
+        ${state.reportRecipients.map((em,i)=>`
+          <div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid #1a2e20">
+            <div style="width:32px;height:32px;border-radius:50%;background:rgba(45,106,79,.3);display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0">📧</div>
+            <div style="flex:1;font-size:13px;font-weight:500">${h(em)}</div>
+            <button data-idx="${i}" class="rm-recipient" style="background:none;border:none;color:#6b8f76;font-size:18px;cursor:pointer;line-height:1;padding:0 4px">×</button>
+          </div>`).join("")}
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid #1a2e20">
+          <div style="font-size:11px;color:#6b8f76;margin-bottom:6px">Reports go to all recipients above. Add yourself and anyone else in your pick'em group.</div>
+          <div style="display:flex;gap:8px" id="add-recipient-form" style="display:none">
+            <input id="new-recipient-inp" class="field-inp" type="email" placeholder="email@example.com" style="flex:1;padding:7px 10px;font-size:13px"/>
+            <button id="confirm-add-recipient" style="padding:7px 14px;background:linear-gradient(135deg,#2d6a4f,#1a3c2e);border:none;border-radius:7px;color:#fff;font-size:13px;cursor:pointer;font-family:'DM Sans',sans-serif">Add</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">📅 Auto-Send Schedule
+        <span style="font-size:11px;color:#6b8f76;font-weight:400">${currSched?h(currSched.name):"No active tournament"}</span>
+      </div>
+      <div style="padding:14px 16px">
+        ${sendSchedule.length===0?`<div style="font-size:13px;color:#6b8f76">No tournament scheduled.</div>`:""}
+        ${sendSchedule.map(s=>`
+          <div style="display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid #1a2e20;opacity:${s.isPast&&!s.sent?.5:1}">
+            <div style="font-size:18px">${s.sent?"✅":s.isPast?"⏭":"⏳"}</div>
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:600;color:${s.sent?"#86efac":s.isPast?"#6b8f76":"#e8f0eb"}">${s.label}</div>
+              <div style="font-size:11px;color:#6b8f76;margin-top:1px">${s.date} · after 7am local time</div>
+            </div>
+            <div style="font-size:11px;font-family:'DM Mono',monospace;color:${s.sent?"#52b788":"#6b8f76"}">${s.sent?"Sent":"Pending"}</div>
+          </div>`).join("")}
+        <div style="font-size:11px;color:#6b8f76;margin-top:10px;line-height:1.5">Reports auto-send once per day when you open the dashboard. Rankings improve closer to tee time as conditions data comes in.</div>
+      </div>
+    </div>
+  </div>`;
+
+  // Preview + Manual send
+  html+=`<div class="panel" style="margin-bottom:18px">
+    <div class="panel-header">📤 Send Now
+      <div style="display:flex;gap:8px">
+        <button id="btn-preview-report" style="padding:6px 14px;background:transparent;border:1px solid #2d6a4f;border-radius:7px;color:#52b788;font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif">👁 Preview</button>
+        <button id="btn-manual-send" style="padding:6px 14px;background:linear-gradient(135deg,#2d6a4f,#1a3c2e);border:none;border-radius:7px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif">📧 Send to All</button>
+      </div>
+    </div>
+    <div style="padding:14px 16px;display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div style="font-size:13px;font-weight:600">Current Rankings Report</div>
+        <div style="font-size:12px;color:#6b8f76;margin-top:3px">
+          Sends to ${state.reportRecipients.length} recipient${state.reportRecipients.length!==1?"s":""} · 
+          ${state.ranker.length} players ranked ·
+          Confidence ${state.confidence||0}%
+        </div>
+      </div>
+      <div style="font-size:12px;color:#6b8f76">Last sent: ${state.emailLog[0]?.ts||"Never"}</div>
+    </div>
+  </div>`;
+
+  // Send log
+  html+=`<div class="panel">
+    <div class="panel-header">📋 Send Log</div>
+    <div style="padding:0">
+      ${state.emailLog.length===0?`<div style="padding:18px 16px;font-size:13px;color:#6b8f76">No emails sent yet.</div>`:""}
+      ${state.emailLog.slice(0,20).map((e,i)=>`
+        <div style="padding:10px 16px;border-bottom:1px solid #1a2e20;display:flex;align-items:center;gap:12px">
+          <div style="font-size:16px">${e.ok?"✅":"❌"}</div>
+          <div style="flex:1">
+            <div style="font-size:13px;font-weight:500">${h(e.subject||"")}</div>
+            <div style="font-size:11px;color:#6b8f76;margin-top:2px">To: ${h(e.to||"")} · ${h(e.type||"")}</div>
+          </div>
+          <div style="font-size:11px;font-family:'DM Mono',monospace;color:#6b8f76;white-space:nowrap">${h(e.ts||"")}</div>
+        </div>`).join("")}
+    </div>
+  </div>`;
+
+  container.innerHTML=html;
+
+  // Wire up add recipient form toggle
+  const addBtn=container.querySelector("#btn-add-recipient");
+  const form=container.querySelector("#add-recipient-form");
+  if(addBtn&&form){
+    addBtn.onclick=()=>{ form.style.display=form.style.display==="none"?"flex":"none"; setTimeout(()=>container.querySelector("#new-recipient-inp")?.focus(),50); };
+  }
+  const confirmBtn=container.querySelector("#confirm-add-recipient");
+  if(confirmBtn){
+    confirmBtn.onclick=()=>{
+      const val=container.querySelector("#new-recipient-inp")?.value?.trim();
+      if(val&&val.includes("@")&&!state.reportRecipients.includes(val)){
+        state.reportRecipients.push(val);
+        if(!state.email) state.email=val; // set primary if none
+        sSet("reportRecipients",state.reportRecipients);
+        sSet("email",state.email);
+        renderReports(container);
+      }
+    };
+  }
+
+  // Remove recipient buttons
+  container.querySelectorAll(".rm-recipient").forEach(btn=>{
+    btn.onclick=()=>{
+      const idx=parseInt(btn.dataset.idx);
+      state.reportRecipients.splice(idx,1);
+      if(state.email===btn.closest("[data-em]")?.dataset?.em) state.email=state.reportRecipients[0]||"";
+      sSet("reportRecipients",state.reportRecipients);
+      sSet("email",state.email);
+      renderReports(container);
+    };
   });
 
-  if(!upcoming) return;
+  // Preview button — show email in a modal
+  container.querySelector("#btn-preview-report")?.addEventListener("click",()=>{
+    const {subject,body}=buildEmailBody(false,0);
+    const overlay=document.createElement("div");
+    overlay.className="overlay";
+    overlay.style.cssText="position:fixed;inset:0;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;z-index:1000;padding:20px";
+    overlay.innerHTML=`<div style="background:#111c14;border:1px solid #2d6a4f;border-radius:13px;width:620px;max-height:85vh;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 24px 64px rgba(0,0,0,.7)">
+      <div style="padding:16px 20px;border-bottom:1px solid #1a2e20;display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
+        <div>
+          <div style="font-family:'Playfair Display',serif;font-size:17px;font-weight:700">Email Preview</div>
+          <div style="font-size:11px;color:#6b8f76;margin-top:3px">To: ${state.reportRecipients.map(e=>h(e)).join(", ")||"(no recipients)"}</div>
+        </div>
+        <button id="prev-close" style="background:none;border:none;color:#6b8f76;font-size:22px;cursor:pointer;line-height:1">×</button>
+      </div>
+      <div style="padding:14px 20px;border-bottom:1px solid #1a2e20;flex-shrink:0">
+        <div style="font-size:11px;color:#6b8f76;margin-bottom:3px;font-family:'DM Mono',monospace;text-transform:uppercase">Subject</div>
+        <div style="font-size:14px;font-weight:600;color:#f5d97a">${h(subject)}</div>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:16px 20px">
+        <pre style="font-family:'DM Mono',monospace;font-size:12px;color:#c8ddd1;white-space:pre-wrap;line-height:1.7;background:#080d0b;padding:14px;border-radius:8px;border:1px solid #1a2e20">${h(body)}</pre>
+      </div>
+      <div style="padding:14px 20px;border-top:1px solid #1a2e20;display:flex;gap:8px;justify-content:flex-end;flex-shrink:0">
+        <button id="prev-cancel" style="padding:8px 16px;background:transparent;border:1px solid #1a2e20;border-radius:7px;color:#6b8f76;font-size:13px;cursor:pointer;font-family:'DM Sans',sans-serif">Close</button>
+        <button id="prev-send" style="padding:8px 20px;background:linear-gradient(135deg,#2d6a4f,#1a3c2e);border:none;border-radius:7px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif">📧 Send Now</button>
+      </div>
+    </div>`;
+    document.body.appendChild(overlay);
+    const close=()=>document.body.removeChild(overlay);
+    overlay.querySelector("#prev-close").onclick=close;
+    overlay.querySelector("#prev-cancel").onclick=close;
+    overlay.onclick=e=>{ if(e.target===overlay) close(); };
+    overlay.querySelector("#prev-send").onclick=async()=>{
+      const sendBtn=overlay.querySelector("#prev-send");
+      sendBtn.disabled=true; sendBtn.textContent="Sending…";
+      const ok=await sendEmailReport(false,0);
+      sendBtn.textContent=ok?"✅ Sent!":"❌ Failed";
+      setTimeout(close,1500);
+      renderReports(container);
+    };
+  });
 
-  const emailKey=`emailSent_${upcoming.w}`;
-  const alreadySent=sGet(emailKey);
-  if(alreadySent) return;
-
-  // Only send if we have rankings and it's after 6am local time
-  const hour=today.getHours();
-  if(hour<6||state.ranker.length<5) return;
-
-  sSet(emailKey,true);
-  sendEmailReport(true).then(ok=>{
-    if(!ok) sSet(emailKey,false); // retry next load if failed
+  // Manual send
+  container.querySelector("#btn-manual-send")?.addEventListener("click",async()=>{
+    if(!state.reportRecipients.length){ alert("Add at least one recipient first."); return; }
+    const btn=container.querySelector("#btn-manual-send");
+    btn.disabled=true; btn.textContent="Sending…";
+    const ok=await sendEmailReport(false,0);
+    btn.disabled=false; btn.textContent=ok?"✅ Sent!":"❌ Failed";
+    setTimeout(()=>{ btn.textContent="📧 Send to All"; renderReports(container); },2000);
   });
 }
 
